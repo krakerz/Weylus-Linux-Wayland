@@ -8,11 +8,11 @@ use fltk::app;
 use fltk::enums::{FrameType, LabelType};
 use fltk::image::PngImage;
 use fltk::menu::Choice;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use tracing::{error, info, warn};
 
 use fltk::{
-    app::{awake_callback, App},
+    app::{App, awake_callback},
     button::{Button, CheckButton},
     frame::Frame,
     input::{Input, IntInput},
@@ -22,10 +22,9 @@ use fltk::{
     window::Window,
 };
 
-#[cfg(not(target_os = "windows"))]
 use pnet_datalink as datalink;
 
-use crate::config::{write_config, Config, ThemeType};
+use crate::config::{Config, ThemeType, write_config};
 use crate::protocol::{CustomInputAreas, Rect};
 use crate::web::Web2UiMessage::UInputInaccessible;
 
@@ -35,7 +34,9 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     let padding = 10;
 
     let app = App::default().with_scheme(fltk::app::AppScheme::Gtk);
-    config.gui_theme.map(|th| th.apply());
+    if let Some(th) = config.gui_theme {
+        th.apply()
+    }
     let mut wind = Window::default()
         .with_size(660, 600)
         .center_screen()
@@ -76,57 +77,31 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     check_auto_start.set_tooltip("Start Weylus server immediately on program start.");
     check_auto_start.set_checked(config.auto_start);
 
-    #[cfg(target_os = "linux")]
     let mut check_wayland = CheckButton::default()
         .with_size(70, height)
         .right_of(&check_auto_start, 3 * padding)
         .with_label("Wayland/\nPipeWire\nSupport");
-    #[cfg(target_os = "linux")]
-    {
-        check_wayland.set_tooltip(
-            "EXPERIMENTAL! This may crash your desktop! Enables screen \
-        capturing for Wayland using PipeWire and GStreamer.",
-        );
-        check_wayland.set_checked(config.wayland_support);
-    }
+    check_wayland.set_tooltip(
+        "Capture the screen through xdg-desktop-portal and PipeWire (needed on Wayland).",
+    );
+    check_wayland.set_checked(config.wayland_support);
 
     let mut label_hw_accel = Frame::default()
         .with_size(width, height)
         .below_of(&check_auto_start, padding)
         .with_label("Try Hardware acceleration");
     label_hw_accel.set_tooltip(
-        "On many systems video encoding can be done with hardware \
-        acceleration. By default this is disabled as the quality and stability of video encoding \
-        varies greatly among hardware and drivers. Currently this is only supported on Linux.",
+        "Encode video on the GPU when possible; falls back to software encoding (libx264) otherwise.",
     );
 
     let mut check_native_hw_accel = CheckButton::default()
         .with_size(70, height)
         .below_of(&label_hw_accel, 0);
 
-    #[cfg(target_os = "linux")]
-    {
-        check_native_hw_accel.set_label("VAAPI");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the Video Acceleration API.");
-        check_native_hw_accel.set_checked(config.try_vaapi);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        check_native_hw_accel.set_label("VideoToolbox");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the VideoToolbox API.");
-        check_native_hw_accel.set_checked(config.try_videotoolbox);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        check_native_hw_accel.set_label("Media-\nFoundation");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the MediaFoundation API.");
-        check_native_hw_accel.set_checked(config.try_mediafoundation);
-    }
+    check_native_hw_accel.set_label("VAAPI");
+    check_native_hw_accel
+        .set_tooltip("Try to use hardware acceleration through the Video Acceleration API.");
+    check_native_hw_accel.set_checked(config.try_vaapi);
 
     let mut check_nvenc = CheckButton::default()
         .with_size(70, height)
@@ -134,14 +109,7 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
         .with_label("NVENC");
     check_nvenc.set_tooltip("Try to use Nvidia's NVENC to encode the video via GPU.");
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
     check_nvenc.set_checked(config.try_nvenc);
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        check_nvenc.deactivate();
-        check_nvenc.hide();
-    }
 
     let mut but_toggle = Button::default()
         .with_size(width, height)
@@ -169,7 +137,7 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     for theme in ThemeType::themes() {
         choice_theme.add_choice(&theme.name());
     }
-    choice_theme.set_value(config.gui_theme.unwrap_or(ThemeType::default()).to_index());
+    choice_theme.set_value(config.gui_theme.unwrap_or_default().to_index());
 
     let mut qr_frame = Frame::default()
         .with_size(235, 235)
@@ -225,23 +193,9 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     config.bind_address = bind_addr;
                     config.auto_start = check_auto_start.is_checked();
                     config.gui_theme = Some(ThemeType::from_index(choice_theme.value()));
-                    #[cfg(target_os = "linux")]
-                    {
-                        config.try_vaapi = check_native_hw_accel.is_checked();
-                        config.wayland_support = check_wayland.is_checked();
-                    }
-                    #[cfg(any(target_os = "linux", target_os = "windows"))]
-                    {
-                        config.try_nvenc = check_nvenc.is_checked();
-                    }
-                    #[cfg(target_os = "macos")]
-                    {
-                        config.try_videotoolbox = check_native_hw_accel.is_checked();
-                    }
-                    #[cfg(target_os = "windows")]
-                    {
-                        config.try_mediafoundation = check_native_hw_accel.is_checked();
-                    }
+                    config.try_vaapi = check_native_hw_accel.is_checked();
+                    config.wayland_support = check_wayland.is_checked();
+                    config.try_nvenc = check_nvenc.is_checked();
                 }
                 if !weylus.start(&config, |message| match message {
                     UInputInaccessible => awake_callback(move || {
@@ -273,7 +227,6 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
 
                 let mut web_sock = SocketAddr::new(config.bind_address, config.web_port);
 
-                #[cfg(not(target_os = "windows"))]
                 {
                     if web_sock.ip().is_unspecified() {
                         // try to guess an ip
@@ -305,7 +258,6 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     }
                 }
 
-                #[cfg(not(target_os = "windows"))]
                 {
                     use image::Luma;
                     use qrcode::QrCode;
@@ -346,14 +298,6 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     cb(&mut qr_frame, x, y, w, h);
                     qr_frame.resize_callback(cb);
                     qr_frame.show();
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    if web_sock.ip().is_unspecified() {
-                        output_server_addr.set_value("http://<your ip address>");
-                    } else {
-                        output_server_addr.set_value(&format!("http://{}", web_sock.to_string()));
-                    }
                 }
                 output_server_addr.show();
                 but.set_label("Stop");
@@ -483,15 +427,11 @@ fn create_custom_input_area_window() -> InputAreaWindowContext {
     choice_pen.set_tooltip(tool_tip);
 
     frame.handle(|frame, event| match event {
-        fltk::enums::Event::Push => {
-            if app::event_clicks() {
-                if let Some(mut win) = frame.window() {
-                    win.fullscreen(!win.fullscreen_active());
-                }
-                true
-            } else {
-                false
+        fltk::enums::Event::Push if app::event_clicks() => {
+            if let Some(mut win) = frame.window() {
+                win.fullscreen(!win.fullscreen_active());
             }
+            true
         }
         _ => false,
     });
@@ -577,8 +517,8 @@ fn custom_input_area_window_handle_events(
     win.handle(move |win, event| {
         match event {
             fltk::enums::Event::Move => {
-                let (x, y) = get_screen_coords_from_event_coords(&win, app::event_coords());
-                let flags = get_mouse_flags(&win, x, y);
+                let (x, y) = get_screen_coords_from_event_coords(win, app::event_coords());
+                let flags = get_mouse_flags(win, x, y);
                 set_cursor(win, &mut current_cursor, Some(flags));
                 true
             }
@@ -587,19 +527,19 @@ fn custom_input_area_window_handle_events(
                 true
             }
             fltk::enums::Event::Push => {
-                (x, y) = get_screen_coords_from_event_coords(&win, app::event_coords());
+                (x, y) = get_screen_coords_from_event_coords(win, app::event_coords());
                 win_x_drag_start = win.x();
                 win_y_drag_start = win.y();
                 win_w_drag_start = win.w();
                 win_h_drag_start = win.h();
-                drag_flags = get_mouse_flags(&win, x, y);
+                drag_flags = get_mouse_flags(win, x, y);
                 true
             }
             fltk::enums::Event::Drag => {
                 if win.opacity() == 1.0 {
                     win.set_opacity(0.5);
                 }
-                let (x_new, y_new) = get_screen_coords_from_event_coords(&win, app::event_coords());
+                let (x_new, y_new) = get_screen_coords_from_event_coords(win, app::event_coords());
                 let dx = x_new - x;
                 let dy = y_new - y;
                 match drag_flags {

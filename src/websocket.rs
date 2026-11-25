@@ -3,14 +3,14 @@ use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{mpsc, Arc};
-use std::thread::{spawn, JoinHandle};
+use std::sync::{Arc, mpsc};
+use std::thread::{JoinHandle, spawn};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::channel;
-use tracing::{error, trace, warn};
+use tracing::{error, info, trace, warn};
 
-use crate::capturable::{get_capturables, Capturable, Recorder};
-use crate::input::device::{InputDevice, InputDeviceType};
+use crate::capturable::{Capturable, Recorder, get_capturables};
+use crate::input::device::InputDevice;
 use crate::protocol::{
     ClientConfiguration, KeyboardEvent, MessageInbound, MessageOutbound, PointerEvent,
     WeylusReceiver, WeylusSender, WheelEvent,
@@ -51,7 +51,6 @@ pub struct WeylusClientHandler<S, R, FnUInput> {
     capturables: Vec<Box<dyn Capturable>>,
     on_uinput_inaccessible: FnUInput,
     config: WeylusClientConfig,
-    #[cfg(target_os = "linux")]
     capture_cursor: bool,
     client_name: Option<String>,
     video_thread: JoinHandle<()>,
@@ -60,7 +59,6 @@ pub struct WeylusClientHandler<S, R, FnUInput> {
 #[derive(Clone, Copy)]
 pub struct WeylusClientConfig {
     pub encoder_options: EncoderOptions,
-    #[cfg(target_os = "linux")]
     pub wayland_support: bool,
     pub no_gui: bool,
 }
@@ -92,7 +90,6 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
             capturables: vec![],
             on_uinput_inaccessible,
             config,
-            #[cfg(target_os = "linux")]
             capture_cursor: false,
             client_name: None,
             video_thread,
@@ -169,22 +166,16 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
     }
 
     fn process_pointer_event(&mut self, event: &PointerEvent) {
-        if self.input_device.is_some() {
-            self.input_device
-                .as_mut()
-                .unwrap()
-                .send_pointer_event(event)
+        if let Some(device) = self.input_device.as_mut() {
+            device.send_pointer_event(event)
         } else {
             warn!("Input device is not initalized, can not process PointerEvent!");
         }
     }
 
     fn process_keyboard_event(&mut self, event: &KeyboardEvent) {
-        if self.input_device.is_some() {
-            self.input_device
-                .as_mut()
-                .unwrap()
-                .send_keyboard_event(event)
+        if let Some(device) = self.input_device.as_mut() {
+            device.send_keyboard_event(event)
         } else {
             warn!("Input device is not initalized, can not process KeyboardEvent!");
         }
@@ -195,12 +186,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
         S: WeylusSender,
     {
         let mut windows = Vec::<String>::new();
-        self.capturables = get_capturables(
-            #[cfg(target_os = "linux")]
-            self.config.wayland_support,
-            #[cfg(target_os = "linux")]
-            self.capture_cursor,
-        );
+        self.capturables = get_capturables(self.config.wayland_support, self.capture_cursor);
         self.capturables.iter().for_each(|c| {
             windows.push(c.name());
         });
@@ -221,16 +207,10 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
         if config.capturable_id < self.capturables.len() {
             let capturable = self.capturables[config.capturable_id].clone();
 
-            #[cfg(target_os = "linux")]
-            {
-                self.capture_cursor = config.capture_cursor;
-            }
+            self.capture_cursor = config.capture_cursor;
 
-            #[cfg(target_os = "linux")]
             if config.uinput_support {
-                if self.input_device.as_ref().map_or(true, |d| {
-                    client_name_changed || d.device_type() != InputDeviceType::UInputDevice
-                }) {
+                if self.input_device.is_none() || client_name_changed {
                     let device = crate::input::uinput_device::UInputDevice::new(
                         capturable.clone(),
                         &self.client_name,
@@ -251,35 +231,8 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                 } else if let Some(d) = self.input_device.as_mut() {
                     d.set_capturable(capturable.clone());
                 }
-            } else if self.input_device.as_ref().map_or(true, |d| {
-                d.device_type() != InputDeviceType::AutoPilotDevice
-            }) {
-                self.input_device = Some(Box::new(
-                    crate::input::autopilot_device::AutoPilotDevice::new(capturable.clone()),
-                ));
-            } else if let Some(d) = self.input_device.as_mut() {
-                d.set_capturable(capturable.clone());
-            }
-
-            #[cfg(target_os = "macos")]
-            if self.input_device.is_none() {
-                self.input_device = Some(Box::new(
-                    crate::input::autopilot_device::AutoPilotDevice::new(capturable.clone()),
-                ));
-            } else {
-                self.input_device
-                    .as_mut()
-                    .map(|d| d.set_capturable(capturable.clone()));
-            }
-            #[cfg(target_os = "windows")]
-            if self.input_device.is_none() {
-                self.input_device = Some(Box::new(
-                    crate::input::autopilot_device_win::WindowsInput::new(capturable.clone()),
-                ));
-            } else {
-                self.input_device
-                    .as_mut()
-                    .map(|d| d.set_capturable(capturable.clone()));
+            } else if self.input_device.take().is_some() {
+                info!("Input disabled by the client (uinput off).");
             }
 
             self.video_sender
@@ -486,7 +439,7 @@ pub fn weylus_websocket_channel(
     websocket: WebSocket<TokioIo<Upgraded>>,
     semaphore_shutdown: Arc<tokio::sync::Semaphore>,
 ) -> (WsWeylusSender, WsWeylusReceiver) {
-    let (rx, mut tx) = websocket.split(|ws| tokio::io::split(ws));
+    let (rx, mut tx) = websocket.split(tokio::io::split);
 
     let mut rx = FragmentCollectorRead::new(rx);
 
@@ -521,7 +474,9 @@ pub fn weylus_websocket_channel(
                     OpCode::Text => match serde_json::from_slice(&frame.payload) {
                         Ok(msg) => {
                             if let Err(err) = sender_inbound.send(msg).await {
-                                warn!("Failed to forward inbound message to WeylusClientHandler: {err}.");
+                                warn!(
+                                    "Failed to forward inbound message to WeylusClientHandler: {err}."
+                                );
                             }
                         }
                         Err(err) => warn!("Failed to parse message: {err}"),

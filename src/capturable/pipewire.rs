@@ -6,10 +6,10 @@ use std::time::Duration;
 use tracing::{debug, trace, warn};
 
 use dbus::{
+    Message,
     arg::{OwnedFd, PropMap, RefArg, Variant},
     blocking::{Proxy, SyncConnection},
     message::{MatchRule, MessageType},
-    Message,
 };
 
 use gstreamer as gst;
@@ -126,18 +126,18 @@ impl PipeWireRecorder {
         let pipeline = gst::Pipeline::new();
 
         let src = gst::ElementFactory::make("pipewiresrc").build()?;
-        src.set_property("fd", &capturable.fd.as_raw_fd());
-        src.set_property("path", &format!("{}", capturable.path));
+        src.set_property("fd", capturable.fd.as_raw_fd());
+        src.set_property("path", format!("{}", capturable.path));
 
         // For some reason pipewire blocks on destruction of AppSink if this is not set to true,
         // see: https://gitlab.freedesktop.org/pipewire/pipewire/-/issues/982
-        src.set_property("always-copy", &true);
+        src.set_property("always-copy", true);
 
         let sink = gst::ElementFactory::make("appsink").build()?;
-        sink.set_property("drop", &true);
-        sink.set_property("max-buffers", &1u32);
+        sink.set_property("drop", true);
+        sink.set_property("max-buffers", 1u32);
 
-        pipeline.add_many(&[&src, &sink])?;
+        pipeline.add_many([&src, &sink])?;
         src.link(&sink)?;
         let appsink = sink
             .dynamic_cast::<AppSink>()
@@ -201,9 +201,7 @@ impl Recorder for PipeWireRecorder {
                 trace!(
                     "Size of mapped buffer: {} does NOT match size of capturable {}x{}@BGRx, \
                     dropping it!",
-                    buf_size,
-                    w,
-                    h
+                    buf_size, w, h
                 );
             } else {
                 // Copy region specified by crop into self.buffer_cropped
@@ -242,8 +240,8 @@ impl Recorder for PipeWireRecorder {
             self.buffer.as_ref().unwrap().as_slice()
         };
         match self.pix_fmt.as_str() {
-            "BGRx" => Ok(PixelProvider::BGR0(self.width, self.height, buf)),
-            "RGBx" => Ok(PixelProvider::RGB0(self.width, self.height, buf)),
+            "BGRx" => Ok(PixelProvider::Bgr0(self.width, self.height, buf)),
+            "RGBx" => Ok(PixelProvider::Rgb0(self.width, self.height, buf)),
             _ => unreachable!(),
         }
     }
@@ -325,11 +323,11 @@ fn streams_from_response(response: &OrgFreedesktopPortalRequestResponse) -> Vec<
                 .filter_map(|stream| {
                     let mut itr = stream.as_iter()?;
                     let path = itr.next()?.as_u64()?;
-                    let (keys, values): (Vec<(usize, &dyn RefArg)>, Vec<(usize, &dyn RefArg)>) =
-                        itr.next()?
-                            .as_iter()?
-                            .enumerate()
-                            .partition(|(i, _)| i % 2 == 0);
+                    let (keys, values): (Vec<IndexedArg>, Vec<IndexedArg>) = itr
+                        .next()?
+                        .as_iter()?
+                        .enumerate()
+                        .partition(|(i, _)| i % 2 == 0);
                     let attributes = keys
                         .iter()
                         .filter_map(|(_, key)| Some(key.as_str()?.to_owned()))
@@ -394,12 +392,14 @@ fn on_create_session_response(
     }
 }
 
+type IndexedArg<'a> = (usize, &'a dyn RefArg);
+
 fn select_devices(
     portal: Proxy<&SyncConnection>,
     context: Arc<Mutex<CallBackContext>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut args: PropMap = HashMap::new();
-    let t: usize = rand::random();
+    let t: u64 = rand::random();
     args.insert(
         "handle_token".to_string(),
         Variant(Box::new(format!("weylus{t}"))),
@@ -415,7 +415,7 @@ fn select_devices(
     // 0: Do not persist (default)
     // 1: Permissions persist as long as the application is running
     // 2: Permissions persist until explicitly revoked
-    args.insert("persist_mode".to_string(), Variant(Box::new(2 as u32)));
+    args.insert("persist_mode".to_string(), Variant(Box::new(2_u32)));
 
     // device types
     // 1: KEYBOARD
@@ -439,7 +439,7 @@ fn select_sources(
     debug!("select_sources");
     let mut args: PropMap = HashMap::new();
 
-    let t: usize = rand::random();
+    let t: u64 = rand::random();
     args.insert(
         "handle_token".to_string(),
         Variant(Box::new(format!("weylus{t}"))),
@@ -461,7 +461,7 @@ fn select_sources(
     // 4: Metadata: The cursor is not part of the screen cast stream, but sent as PipeWire stream metadata.
     let cursor_mode = if capture_cursor { 2u32 } else { 1u32 };
 
-    let is_plasma = std::env::var("DESKTOP_SESSION").map_or(false, |s| s.contains("plasma"));
+    let is_plasma = std::env::var("DESKTOP_SESSION").is_ok_and(|s| s.contains("plasma"));
     if is_plasma && capture_cursor {
         // Warn the user if capturing the cursor is tried on kde as this can crash
         // kwin_wayland and tear down the plasma desktop, see:
@@ -487,7 +487,7 @@ fn on_select_sources_response(
 ) -> Result<(), Box<dyn Error>> {
     debug!("on_select_sources_response");
     let mut args: PropMap = HashMap::new();
-    let t: usize = rand::random();
+    let t: u64 = rand::random();
     args.insert(
         "handle_token".to_string(),
         Variant(Box::new(format!("weylus{t}"))),
@@ -544,8 +544,7 @@ fn request_remote_desktop(
 
     // Disabled for KDE plasma due to https://bugs.kde.org/show_bug.cgi?id=484996
     // List of supported DEs: https://wiki.archlinux.org/title/XDG_Desktop_Portal#List_of_backends_and_interfaces
-    let has_remote_desktop =
-        std::env::var("DESKTOP_SESSION").map_or(false, |s| s.contains("gnome"));
+    let has_remote_desktop = std::env::var("DESKTOP_SESSION").is_ok_and(|s| s.contains("gnome"));
 
     let context = CallBackContext {
         capture_cursor,
@@ -559,8 +558,8 @@ fn request_remote_desktop(
     let context = Arc::new(Mutex::new(context));
 
     let mut args: PropMap = HashMap::new();
-    let t1: usize = rand::random();
-    let t2: usize = rand::random();
+    let t1: u64 = rand::random();
+    let t2: u64 = rand::random();
     args.insert(
         "session_handle_token".to_string(),
         Variant(Box::new(format!("weylus{t1}"))),

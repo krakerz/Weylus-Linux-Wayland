@@ -26,25 +26,8 @@ impl Weylus {
         mut on_web_message: impl FnMut(Web2UiMessage) + Send + 'static,
     ) -> bool {
         let encoder_options = EncoderOptions {
-            #[cfg(target_os = "linux")]
             try_vaapi: config.try_vaapi,
-            #[cfg(not(target_os = "linux"))]
-            try_vaapi: false,
-
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
             try_nvenc: config.try_nvenc,
-            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-            try_nvenc: false,
-
-            #[cfg(target_os = "macos")]
-            try_videotoolbox: config.try_videotoolbox,
-            #[cfg(not(target_os = "macos"))]
-            try_videotoolbox: false,
-
-            #[cfg(target_os = "windows")]
-            try_mediafoundation: config.try_mediafoundation,
-            #[cfg(not(target_os = "windows"))]
-            try_mediafoundation: false,
         };
 
         let (sender_ui, mut receiver_ui) = tokio::sync::mpsc::channel(100);
@@ -61,14 +44,10 @@ impl Weylus {
                 custom_access_html: config.custom_access_html.clone(),
                 custom_style_css: config.custom_style_css.clone(),
                 custom_lib_js: config.custom_lib_js.clone(),
-                #[cfg(target_os = "linux")]
                 enable_custom_input_areas: config.wayland_support,
-                #[cfg(not(target_os = "linux"))]
-                enable_custom_input_areas: false,
             },
             WeylusClientConfig {
                 encoder_options,
-                #[cfg(target_os = "linux")]
                 wayland_support: config.wayland_support,
                 no_gui: config.no_gui,
             },
@@ -105,10 +84,10 @@ impl Weylus {
     }
 
     fn wait(&mut self) {
-        if let Some(t) = self.web_thread.take() {
-            if t.join().is_err() {
-                error!("Web thread panicked.");
-            }
+        if let Some(t) = self.web_thread.take()
+            && t.join().is_err()
+        {
+            error!("Web thread panicked.");
         }
     }
 }

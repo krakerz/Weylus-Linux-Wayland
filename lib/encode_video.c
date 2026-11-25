@@ -71,12 +71,20 @@ typedef struct VideoContext
 	int frame_allocated;
 	int try_vaapi;
 	int try_nvenc;
-	int try_videotoolbox;
-	int try_mediafoundation;
 } VideoContext;
 
 // this is a rust function and lives in src/video.rs
 int write_video_packet(void* rust_ctx, const uint8_t* buf, int buf_size);
+
+// libavformat < 61 declares the AVIO write callback's buffer non-const.
+#if defined(FF_API_AVIO_WRITE_NONCONST) && FF_API_AVIO_WRITE_NONCONST
+static int avio_write_packet(void* opaque, uint8_t* buf, int buf_size)
+#else
+static int avio_write_packet(void* opaque, const uint8_t* buf, int buf_size)
+#endif
+{
+	return write_video_packet(opaque, buf, buf_size);
+}
 
 #if defined(__clang__) || defined(__GNUC__)
 void log_callback(__attribute__((unused)) void* _ptr, int level, const char* fmt_orig, va_list args)
@@ -191,11 +199,12 @@ void init_scaler(
 	char args[512];
 	const AVFilter* buffersrc = avfilter_get_by_name("buffer");
 	const AVFilter* buffersink = avfilter_get_by_name("buffersink");
-	AVFilterInOut* outputs = avfilter_inout_alloc();
-	AVFilterInOut* inputs = avfilter_inout_alloc();
+	AVFilterInOut* outputs = NULL;
+	AVFilterInOut* inputs = NULL;
+	AVFilterGraphSegment* seg = NULL;
 
 	ctx->filter_graph_scale = avfilter_graph_alloc();
-	if (!outputs || !inputs || !ctx->filter_graph_scale)
+	if (!ctx->filter_graph_scale)
 	{
 		ret = AVERROR(ENOMEM);
 		goto end;
@@ -234,6 +243,8 @@ void init_scaler(
 		goto end;
 	}
 
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 39, 100) && \
+	LIBAVFILTER_VERSION_INT >= AV_VERSION_INT(10, 4, 100)
 	ret = av_opt_set_array(
 		ctx->buffersink_scale_ctx,
 		"pixel_formats",
@@ -242,6 +253,16 @@ void init_scaler(
 		1,
 		AV_OPT_TYPE_PIXEL_FMT,
 		&pix_fmt_out);
+#else
+	// FFmpeg < 7.1: only the binary "pix_fmts" option exists (removed in FFmpeg 8).
+	enum AVPixelFormat sink_pix_fmts[] = {pix_fmt_out, AV_PIX_FMT_NONE};
+	ret = av_opt_set_int_list(
+		ctx->buffersink_scale_ctx,
+		"pix_fmts",
+		sink_pix_fmts,
+		AV_PIX_FMT_NONE,
+		AV_OPT_SEARCH_CHILDREN);
+#endif
 	if (ret < 0)
 	{
 		log_warn("Cannot set output pixel format: %s", av_err2str(ret));
@@ -254,16 +275,6 @@ void init_scaler(
 		log_warn("Cannot init buffer sink");
 		goto end;
 	}
-
-	outputs->name = av_strdup("in");
-	outputs->filter_ctx = ctx->buffersrc_scale_ctx;
-	outputs->pad_idx = 0;
-	outputs->next = NULL;
-
-	inputs->name = av_strdup("out");
-	inputs->filter_ctx = ctx->buffersink_scale_ctx;
-	inputs->pad_idx = 0;
-	inputs->next = NULL;
 
 	switch (pix_fmt_out)
 	{
@@ -282,11 +293,7 @@ void init_scaler(
 			snprintf(
 				args,
 				sizeof(args),
-#ifdef HAS_LIBNPP
-				"scale,format=nv12,hwupload_cuda,scale_npp=w=%d:h=%d:format=%s:interp_algo=nn",
-#else
 				"hwupload_cuda,scale_cuda=w=%d:h=%d:format=%s:interp_algo=nearest",
-#endif
 				width_out,
 				height_out,
 				av_get_pix_fmt_name(pix_fmt_sw_out));
@@ -313,20 +320,58 @@ void init_scaler(
 		snprintf(args, sizeof(args), "scale=w=%d:h=%d:flags=fast_bilinear", width_out, height_out);
 	}
 
-	if ((ret = avfilter_graph_parse_ptr(ctx->filter_graph_scale, args, &inputs, &outputs, NULL)) <
-		0)
+	// hwupload reads hw_device_ctx during init and avfilter_graph_parse_ptr inits immediately,
+	// so create the filters, then set the device, then init.
+	ret = avfilter_graph_segment_parse(ctx->filter_graph_scale, args, 0, &seg);
+	if (ret < 0)
 	{
-		log_warn("Failed to parse filter");
+		log_warn("Failed to parse filter: %s", av_err2str(ret));
 		goto end;
 	}
 
-	for (unsigned int i = 0; i < ctx->filter_graph_scale->nb_filters; i++)
+	ret = avfilter_graph_segment_create_filters(seg, 0);
+	if (ret < 0)
 	{
-		AVFilterContext* filt = ctx->filter_graph_scale->filters[i];
-		if (strcmp(filt->filter->name, "hwupload") == 0)
+		log_warn("Failed to create filters: %s", av_err2str(ret));
+		goto end;
+	}
+
+	for (size_t c = 0; c < seg->nb_chains; c++)
+	{
+		for (size_t f = 0; f < seg->chains[c]->nb_filters; f++)
 		{
-			filt->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+			AVFilterContext* filt = seg->chains[c]->filters[f]->filter;
+			if (hw_device_ctx && filt && strcmp(filt->filter->name, "hwupload") == 0)
+				filt->hw_device_ctx = av_buffer_ref(hw_device_ctx);
 		}
+	}
+
+	ret = avfilter_graph_segment_apply(seg, 0, &inputs, &outputs);
+	if (ret < 0)
+	{
+		log_warn("Failed to apply filter graph segment: %s", av_err2str(ret));
+		goto end;
+	}
+
+	if (!inputs || inputs->next || !outputs || outputs->next)
+	{
+		ret = AVERROR(EINVAL);
+		log_warn("Unexpected filter graph endpoints");
+		goto end;
+	}
+
+	ret = avfilter_link(ctx->buffersrc_scale_ctx, 0, inputs->filter_ctx, inputs->pad_idx);
+	if (ret < 0)
+	{
+		log_warn("Failed to link buffer source: %s", av_err2str(ret));
+		goto end;
+	}
+
+	ret = avfilter_link(outputs->filter_ctx, outputs->pad_idx, ctx->buffersink_scale_ctx, 0);
+	if (ret < 0)
+	{
+		log_warn("Failed to link buffer sink: %s", av_err2str(ret));
+		goto end;
 	}
 
 	if ((ret = avfilter_graph_config(ctx->filter_graph_scale, NULL)) < 0)
@@ -336,6 +381,7 @@ void init_scaler(
 	}
 
 end:
+	avfilter_graph_segment_free(&seg);
 	avfilter_inout_free(&inputs);
 	avfilter_inout_free(&outputs);
 
@@ -537,7 +583,7 @@ void open_video(VideoContext* ctx, Error* err)
 					&err);
 				if (err.code)
 				{
-					log_warn("Failed to initialize scaler: %s", err.error_str);
+					log_warn("VAAPI: failed to initialize scaler: %s", err.error_str);
 					avcodec_free_context(&ctx->c);
 				}
 				else
@@ -546,13 +592,16 @@ void open_video(VideoContext* ctx, Error* err)
 					ctx->c->hw_frames_ctx = ctx->scalers.hw_frames_ctx;
 					av_opt_set(ctx->c->priv_data, "quality", "7", 0);
 					av_opt_set(ctx->c->priv_data, "qp", "23", 0);
+					// default 2 holds a finished packet until more frames arrive; frames only come
+					// on screen damage, so that adds a random delay
+					av_opt_set(ctx->c->priv_data, "async_depth", "1", 0);
 					set_codec_params(ctx);
 
-					if ((ret = avcodec_open2(ctx->c, codec, NULL) == 0))
+					if ((ret = avcodec_open2(ctx->c, codec, NULL)) == 0)
 						using_hw = 1;
 					else
 					{
-						log_debug("Could not open codec: %s!", av_err2str(ret));
+						log_warn("VAAPI: could not open codec: %s!", av_err2str(ret));
 						avcodec_free_context(&ctx->c);
 						av_buffer_unref(&ctx->hw_device_ctx);
 						destroy_scalers(&ctx->scalers);
@@ -565,56 +614,6 @@ void open_video(VideoContext* ctx, Error* err)
 	}
 #endif
 
-#ifdef HAS_MEDIAFOUNDATION
-	if (ctx->try_mediafoundation && !using_hw)
-	{
-		codec = avcodec_find_encoder_by_name("h264_mf");
-		if (codec)
-		{
-			ctx->c = avcodec_alloc_context3(codec);
-			if (ctx->c)
-			{
-				Error err = {0};
-				init_scalers(
-					&ctx->scalers,
-					ctx->width_in,
-					ctx->height_in,
-					ctx->width_out,
-					ctx->height_out,
-					AV_PIX_FMT_NV12,
-					AV_PIX_FMT_NV12,
-					NULL,
-					&err);
-				if (err.code)
-				{
-					log_warn("Failed to initialize scaler: %s", err.error_str);
-					avcodec_free_context(&ctx->c);
-				}
-				else
-				{
-					ctx->c->pix_fmt = AV_PIX_FMT_NV12;
-					av_opt_set(ctx->c->priv_data, "rate_control", "ld_vbr", 0);
-					av_opt_set(ctx->c->priv_data, "scenario", "display_remoting", 0);
-					av_opt_set(ctx->c->priv_data, "quality", "100", 0);
-					set_codec_params(ctx);
-					int ret = avcodec_open2(ctx->c, codec, NULL);
-					if (ret == 0)
-						using_hw = 1;
-					else
-					{
-						log_debug("Could not open codec: %s!", av_err2str(ret));
-						avcodec_free_context(&ctx->c);
-						destroy_scalers(&ctx->scalers);
-					}
-				}
-			}
-			else
-				log_debug("Could not allocate video codec context for 'h264_mf'!");
-		}
-		else
-			log_debug("Codec 'h264_mf' not found!");
-	}
-#endif
 
 #ifdef HAS_NVENC
 	if (ctx->try_nvenc && !using_hw &&
@@ -634,11 +633,7 @@ void open_video(VideoContext* ctx, Error* err)
 					ctx->width_out,
 					ctx->height_out,
 					AV_PIX_FMT_CUDA,
-#ifdef HAS_LIBNPP
-					AV_PIX_FMT_NV12,
-#else
 					AV_PIX_FMT_BGR0,
-#endif
 					ctx->hw_device_ctx,
 					&err);
 				if (err.code)
@@ -677,52 +672,6 @@ void open_video(VideoContext* ctx, Error* err)
 	}
 #endif
 
-#ifdef HAS_VIDEOTOOLBOX
-	if (ctx->try_videotoolbox && !using_hw)
-	{
-		codec = avcodec_find_encoder_by_name("h264_videotoolbox");
-		if (codec)
-		{
-			ctx->c = avcodec_alloc_context3(codec);
-			if (ctx->c)
-			{
-				Error err = {0};
-				init_scalers(
-					&ctx->scalers,
-					ctx->width_in,
-					ctx->height_in,
-					ctx->width_out,
-					ctx->height_out,
-					AV_PIX_FMT_YUV420P,
-					AV_PIX_FMT_YUV420P,
-					ctx->hw_device_ctx,
-					&err);
-				if (err.code)
-				{
-					log_warn("Failed to initialize scaler: %s", err.error_str);
-					avcodec_free_context(&ctx->c);
-				}
-				else
-				{
-					ctx->c->pix_fmt = AV_PIX_FMT_YUV420P;
-					av_opt_set(ctx->c->priv_data, "realtime", "true", 0);
-					av_opt_set(ctx->c->priv_data, "allow_sw", "true", 0);
-					av_opt_set(ctx->c->priv_data, "profile", "extended", 0);
-					av_opt_set(ctx->c->priv_data, "level", "5.2", 0);
-					set_codec_params(ctx);
-					if (avcodec_open2(ctx->c, codec, NULL) == 0)
-						using_hw = 1;
-					else
-					{
-						log_debug("Could not open codec: %s!", av_err2str(ret));
-						avcodec_free_context(&ctx->c);
-						destroy_scalers(&ctx->scalers);
-					}
-				}
-			}
-		}
-	}
-#endif
 
 	if (!using_hw)
 	{
@@ -778,7 +727,7 @@ void open_video(VideoContext* ctx, Error* err)
 	int buf_size = 1024 * 1024;
 	ctx->buf = av_malloc(buf_size);
 	ctx->oc->pb = avio_alloc_context(
-		ctx->buf, buf_size, AVIO_FLAG_WRITE, ctx->rust_ctx, NULL, write_video_packet, NULL);
+		ctx->buf, buf_size, AVIO_FLAG_WRITE, ctx->rust_ctx, NULL, avio_write_packet, NULL);
 	if (!ctx->oc->pb)
 		ERROR(err, 1, "Failed to allocate avio context");
 
@@ -864,6 +813,11 @@ void encode_video_frame(VideoContext* ctx, int millis, Error* err)
 	}
 }
 
+const char* get_codec_name(VideoContext* ctx)
+{
+	return ctx->c && ctx->c->codec ? ctx->c->codec->name : NULL;
+}
+
 VideoContext* init_video_encoder(
 	void* rust_ctx,
 	int width_in,
@@ -871,9 +825,7 @@ VideoContext* init_video_encoder(
 	int width_out,
 	int height_out,
 	int try_vaapi,
-	int try_nvenc,
-	int try_videotoolbox,
-	int try_mediafoundation)
+	int try_nvenc)
 {
 	VideoContext* ctx = malloc(sizeof(VideoContext));
 	ctx->rust_ctx = rust_ctx;
@@ -886,8 +838,6 @@ VideoContext* init_video_encoder(
 	ctx->frame_allocated = 0;
 	ctx->try_vaapi = try_vaapi;
 	ctx->try_nvenc = try_nvenc;
-	ctx->try_videotoolbox = try_videotoolbox;
-	ctx->try_mediafoundation = try_mediafoundation;
 	ctx->hw_device_ctx = NULL;
 
 	// make sure all scalers are zero initialized so that destroy can always be called

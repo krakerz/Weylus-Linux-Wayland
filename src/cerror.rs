@@ -28,10 +28,6 @@ impl CError {
         self.code != 0
     }
 
-    pub fn code(&self) -> i32 {
-        self.code as i32
-    }
-
     pub fn to_enum(&self) -> CErrorCode {
         match self.code {
             0 => CErrorCode::NoError,

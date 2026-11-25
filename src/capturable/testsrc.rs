@@ -4,9 +4,9 @@ use std::error::Error;
 
 #[derive(Debug, Clone, Copy)]
 pub enum PixelFormat {
-    BGR0,
-    RGB0,
-    RGB,
+    Bgr0,
+    Rgb0,
+    Rgb,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -19,9 +19,9 @@ pub struct TestCapturable {
 impl TestCapturable {
     fn pixel_size(&self) -> usize {
         match self.pixel_format {
-            PixelFormat::BGR0 => 4,
-            PixelFormat::RGB0 => 4,
-            PixelFormat::RGB => 3,
+            PixelFormat::Bgr0 => 4,
+            PixelFormat::Rgb0 => 4,
+            PixelFormat::Rgb => 3,
         }
     }
     fn set_default_pixel(&self, buf: &mut [u8], x: usize, y: usize) {
@@ -29,8 +29,8 @@ impl TestCapturable {
         let i = x * 8 / w;
         let pos = (x + y * w) * self.pixel_size();
         let (pos_r, pos_g, pos_b) = match self.pixel_format {
-            PixelFormat::BGR0 => (pos + 2, pos + 1, pos),
-            PixelFormat::RGB0 | PixelFormat::RGB => (pos, pos + 1, pos + 2),
+            PixelFormat::Bgr0 => (pos + 2, pos + 1, pos),
+            PixelFormat::Rgb0 | PixelFormat::Rgb => (pos, pos + 1, pos + 2),
         };
         buf[pos_b] = if i & 1 != 0 { 255 } else { 0 };
         buf[pos_g] = if i & 2 != 0 { 255 } else { 0 };
@@ -96,8 +96,8 @@ impl Recorder for TestRecorder {
                 let pos = (x + y * w) * self.capturable.pixel_size();
 
                 let (pos_r, pos_g, pos_b) = match self.capturable.pixel_format {
-                    PixelFormat::BGR0 => (pos + 2, pos + 1, pos),
-                    PixelFormat::RGB0 | PixelFormat::RGB => (pos, pos + 1, pos + 2),
+                    PixelFormat::Bgr0 => (pos + 2, pos + 1, pos),
+                    PixelFormat::Rgb0 | PixelFormat::Rgb => (pos, pos + 1, pos + 2),
                 };
                 buf_ref[pos_b] = ((self.i + N * x / w) % N * 256 / N) as u8;
                 buf_ref[pos_g] = ((self.i + N * x / w + N / 3) % N * 256 / N) as u8;
@@ -105,17 +105,17 @@ impl Recorder for TestRecorder {
             }
         }
         Ok(match self.capturable.pixel_format {
-            PixelFormat::BGR0 => PixelProvider::BGR0(
+            PixelFormat::Bgr0 => PixelProvider::Bgr0(
                 self.capturable.width,
                 self.capturable.height,
                 self.buf.as_slice(),
             ),
-            PixelFormat::RGB0 => PixelProvider::RGB0(
+            PixelFormat::Rgb0 => PixelProvider::Rgb0(
                 self.capturable.width,
                 self.capturable.height,
                 self.buf.as_slice(),
             ),
-            PixelFormat::RGB => PixelProvider::RGB(
+            PixelFormat::Rgb => PixelProvider::Rgb(
                 self.capturable.width,
                 self.capturable.height,
                 self.buf.as_slice(),

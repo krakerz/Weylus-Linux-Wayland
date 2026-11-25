@@ -2,7 +2,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ClientConfiguration {
-    #[cfg(target_os = "linux")]
     pub uinput_support: bool,
     pub capturable_id: usize,
     pub capture_cursor: bool,
@@ -76,48 +75,49 @@ pub enum PointerType {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum PointerEventType {
     #[serde(rename = "pointerdown")]
-    DOWN,
+    Down,
     #[serde(rename = "pointerup")]
-    UP,
+    Up,
     #[serde(rename = "pointercancel")]
-    CANCEL,
+    Cancel,
     #[serde(rename = "pointermove")]
-    MOVE,
+    Move,
     #[serde(rename = "pointerover")]
-    OVER,
+    Over,
     #[serde(rename = "pointerenter")]
-    ENTER,
+    Enter,
     #[serde(rename = "pointerleave")]
-    LEAVE,
+    Leave,
     #[serde(rename = "pointerout")]
-    OUT,
+    Out,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum KeyboardEventType {
     #[serde(rename = "down")]
-    DOWN,
+    Down,
     #[serde(rename = "up")]
-    UP,
+    Up,
     #[serde(rename = "repeat")]
-    REPEAT,
+    Repeat,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum KeyboardLocation {
-    STANDARD,
-    LEFT,
-    RIGHT,
-    NUMPAD,
+    Standard,
+    Left,
+    Right,
+    Numpad,
 }
 
 fn location_from<'de, D: Deserializer<'de>>(deserializer: D) -> Result<KeyboardLocation, D::Error> {
     let code: u8 = Deserialize::deserialize(deserializer)?;
     match code {
-        0 => Ok(KeyboardLocation::STANDARD),
-        1 => Ok(KeyboardLocation::LEFT),
-        2 => Ok(KeyboardLocation::RIGHT),
-        3 => Ok(KeyboardLocation::NUMPAD),
+        0 => Ok(KeyboardLocation::Standard),
+        1 => Ok(KeyboardLocation::Left),
+        2 => Ok(KeyboardLocation::Right),
+        3 => Ok(KeyboardLocation::Numpad),
         _ => Err(serde::de::Error::custom(
             "Failed to parse keyboard location code.",
         )),
@@ -139,10 +139,7 @@ bitflags! {
 
 fn button_from<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Button, D::Error> {
     let bits: u8 = Deserialize::deserialize(deserializer)?;
-    Button::from_bits(bits).map_or(
-        Err(serde::de::Error::custom("Failed to parse button code.")),
-        Ok,
-    )
+    Button::from_bits(bits).ok_or(serde::de::Error::custom("Failed to parse button code."))
 }
 
 #[derive(Serialize, Deserialize, Debug)]

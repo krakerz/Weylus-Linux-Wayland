@@ -13,14 +13,14 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-use crate::websocket::{weylus_websocket_channel, WeylusClientConfig, WeylusClientHandler};
+use crate::websocket::{WeylusClientConfig, WeylusClientHandler, weylus_websocket_channel};
 
 #[derive(Debug)]
 pub enum WebStartUpMessage {
@@ -97,11 +97,11 @@ async fn serve(
                 let params = form_urlencoded::parse(query.as_bytes())
                     .into_owned()
                     .collect::<HashMap<String, String>>();
-                if let Some(code) = params.get("access_code") {
-                    if code == access_code {
-                        authed = true;
-                        debug!(address = ?addr, "Web-Client authenticated.");
-                    }
+                if let Some(code) = params.get("access_code")
+                    && code == access_code
+                {
+                    authed = true;
+                    debug!(address = ?addr, "Web-Client authenticated.");
                 }
             }
         }
@@ -124,8 +124,8 @@ async fn serve(
             }
             let config = IndexTemplateContext {
                 access_code: context.web_config.access_code.clone(),
-                uinput_enabled: cfg!(target_os = "linux"),
-                capture_cursor_enabled: cfg!(not(target_os = "windows")),
+                uinput_enabled: true,
+                capture_cursor_enabled: true,
                 log_level: crate::log::get_log_level().to_string(),
                 enable_custom_input_areas: context.web_config.enable_custom_input_areas,
             };
@@ -163,7 +163,7 @@ async fn serve(
             let (response, fut) = upgrade::upgrade(&mut req).unwrap();
             num_clients.fetch_add(1, Ordering::Relaxed);
 
-            let config = context.weylus_client_config.clone();
+            let config = context.weylus_client_config;
             tokio::spawn(async move {
                 match fut.await {
                     Ok(ws) => {
