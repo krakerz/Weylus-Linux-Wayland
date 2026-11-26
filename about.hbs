@@ -1,0 +1,19 @@
+Third-party licenses
+====================
+
+Weylus is AGPL-3.0-or-later (see LICENSE). Release builds also contain the
+Rust crates below, the Lucide icons (LUCIDE-LICENSE, ISC) and FFmpeg and x264
+(GPL, see INSTALL.txt).
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{name}} ({{id}})
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

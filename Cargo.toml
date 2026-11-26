@@ -1,6 +1,6 @@
 [package]
 name = "weylus"
-version = "0.12.0"
+version = "0.13.0"
 authors = ["HMH <henry@freedesk.net>"]
 license = "AGPL-3.0-or-later"
 edition = "2024"
@@ -17,8 +17,6 @@ clap_complete = "4.5.29"
 dbus = "^0.9"
 dirs = "7"
 fastwebsockets = { version = "0.10", features = ["upgrade", "unstable-split"] }
-fltk = { version = "^1.5", features = ["use-wayland"] }
-fltk-theme = "^0.7.9"
 gstreamer = "0.25"
 gstreamer-app = { version = "0.25", features = ["v1_16"] }
 gstreamer-video = "0.25"
@@ -26,17 +24,18 @@ handlebars = "^6.1"
 http-body-util = "0.1.2"
 hyper = { version = "^1.4", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1.8", features = ["tokio"] }
-image = { version = "^0.25", features = ["png"], default-features = false }
+ipnet = "2"
 libc = "0.2"
 percent-encoding = "2.1.0"
 pnet_datalink = "^0.35"
-qrcode = "0.15"
+qrcode = { version = "0.15", default-features = false, features = ["std", "svg"] }
 rand = "0.10"
 ring = "0.17"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 sha2 = "0.10"
 signal-hook = "0.4"
+tauri = { version = "2.12", default-features = false, features = ["wry", "compression", "custom-protocol", "dbus", "tray-icon", "image-png"] }
 tokio = { version = "^1", features = ["fs", "macros", "rt-multi-thread", "sync", "net"] }
 toml = "1"
 tracing = "^0.1"
@@ -47,6 +46,7 @@ url = "^2.5"
 [build-dependencies]
 cc = "^1.1"
 pkg-config = "^0.3"
+tauri-build = { version = "2.7", features = [] }
 
 [features]
 bench = []

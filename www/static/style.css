@@ -145,6 +145,9 @@ input[type='range']::-webkit-slider-runnable-track, input[type="range"]::-moz-ra
     display: block;
     margin-top: 0.5em;
 }
+#source_section a {
+    color: inherit;
+}
 #settings section.hide, section label.hide, section button.hide, #debug_overlay.hide {
     display: none !important;
 }
@@ -242,6 +245,10 @@ label input:disabled + span {
     user-select: none;
     -webkit-user-select: none;
 }
+#zoom_grip { display: none !important; }
+#zoom_controls.collapsed { opacity: 40%; }
+#zoom_controls.collapsed > :not(#zoom_grip) { display: none !important; }
+#zoom_controls.collapsed > #zoom_grip { display: inline-flex !important; }
 #settings.lefty ~ #zoom_controls {
     left: auto;
     right: max(0.75rem, env(safe-area-inset-right));

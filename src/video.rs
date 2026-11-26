@@ -20,7 +20,6 @@ unsafe extern "C" {
         codec: c_int,
     ) -> *mut c_void;
     fn request_keyframe(handle: *mut c_void);
-    #[cfg(test)]
     fn get_codec_name(handle: *mut c_void) -> *const std::os::raw::c_char;
     #[cfg(test)]
     fn avcodec_find_encoder_by_name(name: *const std::os::raw::c_char) -> *const c_void;
@@ -199,7 +198,6 @@ impl VideoEncoder {
         unsafe { request_keyframe(self.handle) }
     }
 
-    #[cfg(test)]
     pub fn codec_name(&self) -> Option<String> {
         // SAFETY: the handle is valid for the lifetime of `self` and the returned string is a
         // static codec name owned by libavcodec (or null if no codec is open).

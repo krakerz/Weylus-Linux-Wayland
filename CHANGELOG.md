@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-11-26
+
+### Added
+- New desktop window: settings, the tablet address with QR code, the log and updates in one view, with light and dark mode
+- "Remember shared screen" setting in the desktop window
+- Tray icon with show, start/stop and quit; closing the window keeps Weylus in the tray (can be turned off)
+- Copy button for the tablet address
+- Allowed clients setting (`--allowed-clients`): only the listed IP addresses or ranges can connect; this computer always can
+- Optional prompt in the desktop window before a new device connects: allow this session, always allow, or deny
+- Connected devices list in the desktop window with codec, resolution and frame rate, and Disconnect and Block buttons
+- Source code link in the tablet page and the desktop window
+- Release packages include the licences of bundled third-party code
+
+### Changed
+- The desktop window needs WebKitGTK 4.1 (`webkit2gtk-4.1`) instead of FLTK
+- Custom input areas are set as percentages of the screen in the desktop window
+- The zoom controls on the tablet fold into a small button after a few seconds; tap it to open them again
+
+### Removed
+- The `--gui-theme` option and the FLTK themes
+
+### Security
+- Access codes are compared in constant time
+- Five wrong access codes within five minutes block that address for five minutes
+
 ## [0.12.0] — 2026-11-25
 
 ### Added

@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weylus</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <!-- Icons from Lucide (https://lucide.dev), ISC license: www/static/LUCIDE-LICENSE -->
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="16" height="20" x="4" y="2" rx="2" ry="2"/>
+            <line x1="12" x2="12.01" y1="18" y2="18"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1 class="brand-title">Weylus</h1>
+          <span class="status-pill" aria-hidden="true">
+            <span class="status-dot"></span>
+            <span class="status-label-stopped">Stopped</span>
+            <span class="status-label-running">Running</span>
+          </span>
+        </div>
+      </div>
+
+      <button type="button" id="toggle_server" class="btn-toggle" data-running="false">
+        <svg class="icon-play" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polygon points="6 3 20 12 6 21 6 3"/>
+        </svg>
+        <svg class="icon-stop" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect width="14" height="14" x="5" y="5" rx="2"/>
+        </svg>
+        <span id="toggle_server_label">Start</span>
+      </button>
+    </header>
+
+    <main class="workspace">
+      <div class="primary-col">
+      <div class="connect-col">
+      <section id="connect" class="card connect-card" aria-label="Connect tablet" hidden>
+        <div class="card-header">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h.01"/>
+            <path d="M2 8.82a15 15 0 0 1 20 0"/>
+            <path d="M5 12.859a10 10 0 0 1 14 0"/>
+            <path d="M8.5 16.429a5 5 0 0 1 7 0"/>
+          </svg>
+          <h2>Connect your tablet</h2>
+        </div>
+
+        <div class="connect-body">
+          <div class="connect-info">
+            <p class="connect-hint">Open this address in your tablet's browser or scan the QR code.</p>
+            <div class="url-row">
+              <code id="connect_url" class="connect-url"></code>
+              <button type="button" id="copy_url" class="btn btn-secondary" title="Copy address">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                  <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                </svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <div class="other-urls-wrap">
+              <span class="other-urls-label">Other addresses</span>
+              <ul id="other_urls" class="other-urls"></ul>
+            </div>
+          </div>
+          <div class="qr-frame">
+            <div id="qr" class="qr-box" aria-label="QR code for tablet connection"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="clients" class="card clients-card" aria-label="Connected devices" hidden>
+        <div class="card-header clients-header">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8"/>
+            <path d="M10 19v-3.96 3.15"/>
+            <path d="M7 19h5"/>
+            <rect width="6" height="10" x="16" y="12" rx="2"/>
+          </svg>
+          <h2>Connected devices</h2>
+          <span id="clients_count" class="clients-count"></span>
+        </div>
+        <div class="clients-body">
+          <p id="clients_empty" class="clients-empty">No devices connected.</p>
+          <ul id="clients_list" class="clients-list"></ul>
+          <template id="client_row">
+            <li class="client-row">
+              <div class="client-meta">
+                <span class="client-ip"></span>
+                <span class="client-details">
+                  <span class="client-since"></span>
+                  <span class="client-video"></span>
+                </span>
+              </div>
+              <div class="client-actions">
+                <button type="button" class="client-disconnect btn btn-secondary btn-sm" data-action="disconnect">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="m19 5 3-3"/>
+                    <path d="m2 22 3-3"/>
+                    <path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z"/>
+                    <path d="M7.5 13.5 10 11"/>
+                    <path d="M10.5 16.5 13 14"/>
+                    <path d="m12 6 6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0Z"/>
+                  </svg>
+                  <span>Disconnect</span>
+                </button>
+                <button type="button" class="client-disconnect btn btn-secondary btn-sm" data-action="block" title="Disconnect and block until the server stops">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="m4.9 4.9 14.2 14.2"/>
+                  </svg>
+                  <span>Block</span>
+                </button>
+              </div>
+            </li>
+          </template>
+        </div>
+      </section>
+      </div>
+
+      <fieldset id="settings" class="card settings-card">
+        <legend class="sr-only">Server settings</legend>
+        <div class="card-header">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="21" x2="14" y1="4" y2="4"/>
+            <line x1="10" x2="3" y1="4" y2="4"/>
+            <line x1="21" x2="12" y1="12" y2="12"/>
+            <line x1="8" x2="3" y1="12" y2="12"/>
+            <line x1="21" x2="16" y1="20" y2="20"/>
+            <line x1="12" x2="3" y1="20" y2="20"/>
+            <line x1="14" x2="14" y1="2" y2="6"/>
+            <line x1="8" x2="8" y1="10" y2="14"/>
+            <line x1="16" x2="16" y1="18" y2="22"/>
+          </svg>
+          <h2>Settings</h2>
+        </div>
+
+        <div class="settings-body">
+          <div class="field-grid">
+            <div class="field">
+              <label for="bind_address">Bind address</label>
+              <input type="text" id="bind_address" autocomplete="off" spellcheck="false" placeholder="0.0.0.0">
+            </div>
+            <div class="field">
+              <label for="web_port">Web port</label>
+              <input type="number" id="web_port" min="1" max="65535" step="1" placeholder="1701">
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="access_code">Access code</label>
+            <input type="text" id="access_code" autocomplete="off" spellcheck="false" placeholder="Optional">
+            <p class="field-help">Restrict who can control your computer with an access code. Note that this does NOT do any kind of encryption and it is advised to only run Weylus inside trusted networks! Do NOT reuse any of your passwords! If left blank, no code is required to access Weylus remotely.</p>
+          </div>
+
+          <div class="field">
+            <label for="allowed_clients">Allowed clients</label>
+            <input type="text" id="allowed_clients" autocomplete="off" spellcheck="false" placeholder="All devices">
+            <p class="field-help">IP addresses or ranges, comma-separated, e.g. 192.168.1.5, 192.168.1.0/24. This computer is always allowed.</p>
+            <p id="allowed_clients_error" class="field-error" role="alert" hidden></p>
+          </div>
+
+          <div class="option-list">
+            <label class="toggle-row" for="ask_new_devices">
+              <input type="checkbox" id="ask_new_devices">
+              <span class="toggle-text">
+                <span class="toggle-title">Ask before new devices connect</span>
+                <span class="toggle-desc">Shows a prompt here for devices not in the list.</span>
+              </span>
+            </label>
+
+            <label class="toggle-row" for="auto_start">
+              <input type="checkbox" id="auto_start">
+              <span class="toggle-text">
+                <span class="toggle-title">Auto-start server</span>
+                <span class="toggle-desc">Start Weylus server immediately on program start.</span>
+              </span>
+            </label>
+
+            <label class="toggle-row" for="wayland_support">
+              <input type="checkbox" id="wayland_support">
+              <span class="toggle-text">
+                <span class="toggle-title">Wayland support</span>
+                <span class="toggle-desc">Capture the screen through xdg-desktop-portal and PipeWire (needed on Wayland).</span>
+              </span>
+            </label>
+
+            <label class="toggle-row" for="remember_screen">
+              <input type="checkbox" id="remember_screen">
+              <span class="toggle-text">
+                <span class="toggle-title">Remember shared screen</span>
+                <span class="toggle-desc">Don't ask for the screen again until Weylus restarts.</span>
+              </span>
+            </label>
+
+            <label class="toggle-row" for="close_to_tray">
+              <input type="checkbox" id="close_to_tray">
+              <span class="toggle-text">
+                <span class="toggle-title">Close to tray</span>
+                <span class="toggle-desc">Keep Weylus running in the system tray when the window is closed.</span>
+              </span>
+            </label>
+          </div>
+
+          <div class="hw-group" role="group" aria-labelledby="hw_group_title">
+            <div class="hw-header">
+              <span id="hw_group_title" class="hw-title">Try hardware acceleration</span>
+              <span class="hw-desc">Encode video on the GPU when possible; falls back to software encoding (libx264) otherwise.</span>
+            </div>
+            <div class="hw-options">
+              <label class="chip-check" for="try_vaapi"><input type="checkbox" id="try_vaapi"><span>VA-API</span></label>
+              <label class="chip-check" for="try_nvenc"><input type="checkbox" id="try_nvenc"><span>NVENC</span></label>
+            </div>
+          </div>
+
+          <p id="settings_error" class="error-banner" role="alert" hidden></p>
+        </div>
+      </fieldset>
+      </div>
+
+      <section class="card log-card" aria-label="Server log">
+        <div class="card-header">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="4 17 10 11 4 5"/>
+            <line x1="12" x2="20" y1="19" y2="19"/>
+          </svg>
+          <h2>Log</h2>
+        </div>
+        <div id="log" class="log-view" role="log" aria-live="polite" tabindex="0"></div>
+      </section>
+    </main>
+
+    <footer class="update-bar" aria-label="Updates">
+      <div class="update-main">
+        <span id="update_text" class="update-text"></span>
+        <div class="update-controls">
+          <button type="button" id="update_action" class="btn btn-primary btn-sm" hidden></button>
+          <button type="button" id="update_check" class="btn btn-secondary btn-sm">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+              <path d="M21 3v5h-5"/>
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+              <path d="M8 16H3v5"/>
+            </svg>
+            <span>Check now</span>
+          </button>
+        </div>
+      </div>
+      <progress id="update_progress" class="update-progress" max="1" hidden></progress>
+      <div class="update-sub">
+        <label class="inline-check" for="check_updates" title="Look for a newer Weylus release when Weylus starts.">
+          <input type="checkbox" id="check_updates">
+          <span>Check at startup</span>
+        </label>
+        <span class="update-help">Look for a newer Weylus release when Weylus starts.</span>
+        <button type="button" id="source_link" class="link-btn">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="16 18 22 12 16 6"/>
+            <polyline points="8 6 2 12 8 18"/>
+          </svg>
+          <span>Source code</span>
+        </button>
+      </div>
+    </footer>
+  </div>
+
+  <dialog id="approval_dialog" class="modal" aria-labelledby="approval_dialog_title">
+    <div class="modal-header">
+      <div class="modal-title-wrap">
+        <svg class="icon-accent" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
+          <path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3"/>
+          <path d="M12 17h.01"/>
+        </svg>
+        <h2 id="approval_dialog_title">Allow new device?</h2>
+      </div>
+    </div>
+    <div class="modal-body">
+      <p class="approval-prompt">Device at <code id="approval_ip" class="approval-ip"></code> wants to connect.</p>
+      <p id="approval_countdown" class="approval-countdown"></p>
+      <p id="approval_queue" class="approval-queue" hidden></p>
+    </div>
+    <div class="modal-footer approval-footer">
+      <button type="button" id="approval_deny" class="btn btn-secondary">Deny</button>
+      <button type="button" id="approval_once" class="btn btn-secondary">Allow this session</button>
+      <button type="button" id="approval_always" class="btn btn-primary">Always allow</button>
+    </div>
+  </dialog>
+
+  <dialog id="uinput_dialog" class="modal" aria-labelledby="uinput_dialog_title">
+    <div class="modal-header">
+      <div class="modal-title-wrap">
+        <svg class="icon-warn" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>
+          <path d="M12 9v4"/>
+          <path d="M12 17h.01"/>
+        </svg>
+        <h2 id="uinput_dialog_title">uinput inaccessible</h2>
+      </div>
+    </div>
+    <div class="modal-body">
+      <pre id="uinput_text" class="uinput-text"></pre>
+    </div>
+    <div class="modal-footer">
+      <button type="button" id="uinput_close" class="btn btn-primary">Close</button>
+    </div>
+  </dialog>
+
+  <dialog id="areas_dialog" class="modal modal-wide" aria-labelledby="areas_dialog_title">
+    <div class="modal-header">
+      <div class="modal-title-wrap">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 2v14a2 2 0 0 0 2 2h14"/>
+          <path d="M18 22V8a2 2 0 0 0-2-2H2"/>
+        </svg>
+        <h2 id="areas_dialog_title">Custom input areas</h2>
+      </div>
+    </div>
+    <div class="modal-body">
+      <p class="modal-help">Percent of the screen the device is mapped to; unchecked devices use the whole screen.</p>
+
+      <div class="areas-list">
+        <div class="area-card">
+          <label class="area-toggle-label" for="area_mouse_on">
+            <input type="checkbox" id="area_mouse_on" class="area-toggle">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="5" y="2" width="14" height="20" rx="7"/><path d="M12 6v4"/>
+            </svg>
+            <span>Mouse</span>
+          </label>
+          <div class="area-fields">
+            <label class="num-field"><span>X %</span><input type="number" id="area_mouse_x" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>Y %</span><input type="number" id="area_mouse_y" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>W %</span><input type="number" id="area_mouse_w" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>H %</span><input type="number" id="area_mouse_h" min="0" max="100" step="0.1"></label>
+          </div>
+        </div>
+
+        <div class="area-card">
+          <label class="area-toggle-label" for="area_touch_on">
+            <input type="checkbox" id="area_touch_on" class="area-toggle">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M22 14a8 8 0 0 1-8 8"/><path d="M18 11v-1a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/><path d="M14 10V9a2 2 0 0 0-2-2a2 2 0 0 0-2 2v1"/><path d="M10 9.5V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v10"/><path d="M18 11a2 2 0 1 1 4 0v3a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>
+            </svg>
+            <span>Touch</span>
+          </label>
+          <div class="area-fields">
+            <label class="num-field"><span>X %</span><input type="number" id="area_touch_x" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>Y %</span><input type="number" id="area_touch_y" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>W %</span><input type="number" id="area_touch_w" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>H %</span><input type="number" id="area_touch_h" min="0" max="100" step="0.1"></label>
+          </div>
+        </div>
+
+        <div class="area-card">
+          <label class="area-toggle-label" for="area_pen_on">
+            <input type="checkbox" id="area_pen_on" class="area-toggle">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>
+            </svg>
+            <span>Pen</span>
+          </label>
+          <div class="area-fields">
+            <label class="num-field"><span>X %</span><input type="number" id="area_pen_x" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>Y %</span><input type="number" id="area_pen_y" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>W %</span><input type="number" id="area_pen_w" min="0" max="100" step="0.1"></label>
+            <label class="num-field"><span>H %</span><input type="number" id="area_pen_h" min="0" max="100" step="0.1"></label>
+          </div>
+        </div>
+      </div>
+
+      <p id="areas_error" class="error-banner" role="alert" hidden></p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" id="areas_cancel" class="btn btn-secondary">Cancel</button>
+      <button type="button" id="areas_submit" class="btn btn-primary">Apply</button>
+    </div>
+  </dialog>
+</body>
+</html>

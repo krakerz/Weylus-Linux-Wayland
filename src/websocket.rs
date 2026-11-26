@@ -18,6 +18,7 @@ use crate::protocol::{
 };
 
 use crate::cerror::CErrorCode;
+use crate::clients::VideoInfo;
 use crate::codec::CodecOrder;
 use crate::video::{EncoderOptions, VideoEncoder};
 
@@ -146,7 +147,6 @@ pub struct WeylusClientConfig {
     pub wayland_support: bool,
     /// keep the screen share (and its running capture) across connections
     pub remember_screen: bool,
-    pub no_gui: bool,
 }
 
 impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
@@ -155,6 +155,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
         receiver: R,
         on_uinput_inaccessible: FnUInput,
         config: WeylusClientConfig,
+        report_video: Box<dyn Fn(VideoInfo) + Send>,
     ) -> Self
     where
         R: WeylusReceiver,
@@ -171,6 +172,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                     sender,
                     config.encoder_options,
                     config.remember_screen,
+                    report_video,
                 )
             })
         };
@@ -224,7 +226,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                             .unwrap(),
                         MessageInbound::ChooseCustomInputAreas => {
                             let (sender, receiver) = std::sync::mpsc::channel();
-                            crate::gui::get_input_area(self.config.no_gui, sender);
+                            crate::desktop::request_input_areas(sender);
                             let mut sender = self.sender.clone();
                             spawn(move || {
                                 while let Ok(areas) = receiver.recv() {
@@ -394,6 +396,7 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
     mut sender: S,
     base_options: EncoderOptions,
     remember_screen: bool,
+    report_video: Box<dyn Fn(VideoInfo) + Send>,
 ) {
     const EFFECTIVE_INIFINITY: Duration = Duration::from_secs(3600 * 24 * 365 * 200);
 
@@ -410,6 +413,8 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
     let mut last_frame = Instant::now();
     let mut paused = false;
     let mut encoder_options = base_options;
+    let mut fps = 0.0;
+    let mut video_info: Option<VideoInfo> = None;
 
     loop {
         let now = Instant::now();
@@ -508,6 +513,11 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                     EFFECTIVE_INIFINITY
                 };
                 frame_duration = frame_duration.min(EFFECTIVE_INIFINITY);
+                fps = config.frame_rate;
+                if let Some(info) = video_info.as_mut() {
+                    info.fps = fps;
+                    report_video(info.clone());
+                }
 
                 let options = EncoderOptions {
                     codecs: config.codecs,
@@ -588,7 +598,17 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                         encoder_options,
                     );
                     match res {
-                        Ok(r) => video_encoder = Some(r),
+                        Ok(r) => {
+                            let info = VideoInfo {
+                                encoder: r.codec_name().unwrap_or_default(),
+                                width: width_out,
+                                height: height_out,
+                                fps,
+                            };
+                            report_video(info.clone());
+                            video_info = Some(info);
+                            video_encoder = Some(r);
+                        }
                         Err(e) => {
                             warn!("{}", e);
                             continue;
@@ -667,6 +687,7 @@ impl WeylusSender for WsWeylusSender {
 pub fn weylus_websocket_channel(
     websocket: WebSocket<TokioIo<Upgraded>>,
     semaphore_shutdown: Arc<tokio::sync::Semaphore>,
+    disconnect: Arc<tokio::sync::Notify>,
 ) -> (WsWeylusSender, WsWeylusReceiver) {
     let (rx, mut tx) = websocket.split(tokio::io::split);
 
@@ -691,6 +712,7 @@ pub fn weylus_websocket_channel(
 
                 let frame = tokio::select! {
                     _ = semaphore_shutdown.acquire() => break,
+                    _ = disconnect.notified() => break,
                     frame = fut => match frame {
                         Ok(frame) => frame,
                         Err(err) => {

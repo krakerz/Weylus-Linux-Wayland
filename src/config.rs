@@ -5,69 +5,24 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-#[derive(clap::ValueEnum, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ThemeType {
-    Aero,
-    AquaClassic,
-    Blue,
-    Classic,
-    Dark,
-    #[default]
-    Greybird,
-    HighContrast,
-    Metro,
-}
-
-const THEME_LIST: [ThemeType; 8] = [
-    ThemeType::Aero,
-    ThemeType::AquaClassic,
-    ThemeType::Blue,
-    ThemeType::Classic,
-    ThemeType::Dark,
-    ThemeType::Greybird,
-    ThemeType::HighContrast,
-    ThemeType::Metro,
-];
-
-impl ThemeType {
-    pub fn apply(&self) {
-        let theme = match self {
-            ThemeType::Classic => fltk_theme::ThemeType::Classic,
-            ThemeType::Aero => fltk_theme::ThemeType::Aero,
-            ThemeType::Metro => fltk_theme::ThemeType::Metro,
-            ThemeType::AquaClassic => fltk_theme::ThemeType::AquaClassic,
-            ThemeType::Greybird => fltk_theme::ThemeType::Greybird,
-            ThemeType::Blue => fltk_theme::ThemeType::Blue,
-            ThemeType::Dark => fltk_theme::ThemeType::Dark,
-            ThemeType::HighContrast => fltk_theme::ThemeType::HighContrast,
-        };
-        let theme = fltk_theme::WidgetTheme::new(theme);
-        theme.apply();
-    }
-
-    pub fn name(&self) -> String {
-        format!("{self:?}")
-    }
-
-    pub fn to_index(self) -> i32 {
-        THEME_LIST.iter().position(|th| *th == self).unwrap() as i32
-    }
-
-    pub fn from_index(i: i32) -> Self {
-        let i = i.clamp(0, THEME_LIST.len() as i32 - 1) as usize;
-        THEME_LIST[i]
-    }
-
-    pub fn themes() -> &'static [ThemeType] {
-        &THEME_LIST
-    }
-}
-
 #[derive(Serialize, Deserialize, Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct Config {
     #[arg(long, help = "Access code")]
     pub access_code: Option<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Only accept connections from these IP addresses or CIDR ranges, comma-separated (e.g. 192.168.1.5,192.168.1.0/24). Loopback is always allowed; empty allows everyone."
+    )]
+    #[serde(default)]
+    pub allowed_clients: Vec<String>,
+    #[arg(
+        long,
+        help = "Ask in the desktop window before accepting a device that isn't in the allowed clients."
+    )]
+    #[serde(default)]
+    pub ask_new_devices: bool,
     #[arg(long, default_value = "0.0.0.0", help = "Bind address")]
     pub bind_address: IpAddr,
     #[arg(long, default_value = "1701", help = "Web port")]
@@ -85,8 +40,6 @@ pub struct Config {
     #[arg(long, help = "Start Weylus server immediately on program start.")]
     #[serde(default)]
     pub auto_start: bool,
-    #[arg(long, help = "Gui Theme")]
-    pub gui_theme: Option<ThemeType>,
     #[arg(long, help = "Run Weylus without gui and start immediately.")]
     #[serde(default)]
     pub no_gui: bool,
@@ -104,6 +57,13 @@ pub struct Config {
     )]
     #[serde(default = "default_true", rename = "remember_screen")]
     pub remember_screen: bool,
+    #[arg(
+        long = "no-close-to-tray",
+        action = clap::ArgAction::SetFalse,
+        help = "Quit when the window is closed instead of keeping Weylus in the system tray."
+    )]
+    #[serde(default = "default_true", rename = "close_to_tray")]
+    pub close_to_tray: bool,
 
     #[arg(
         long = "no-check-updates",
@@ -258,6 +218,24 @@ mod tests {
     }
 
     #[test]
+    fn close_to_tray_defaults_to_on_and_reads_from_config_file() {
+        assert!(Config::try_parse_from(["weylus"]).unwrap().close_to_tray);
+        assert!(
+            !Config::try_parse_from(["weylus", "--no-close-to-tray"])
+                .unwrap()
+                .close_to_tray
+        );
+        let toml = toml_without_vaapi_and_wayland();
+        assert!(toml.contains("close_to_tray = true"));
+        let config: Config =
+            toml::from_str(&toml.replace("close_to_tray = true", "close_to_tray = false")).unwrap();
+        assert!(!config.close_to_tray);
+        // a file written before the option existed keeps the default
+        let config: Config = toml::from_str(&toml.replace("close_to_tray = true", "")).unwrap();
+        assert!(config.close_to_tray);
+    }
+
+    #[test]
     fn check_updates_defaults_to_on() {
         let config = Config::try_parse_from(["weylus"]).unwrap();
         assert!(config.check_updates);
@@ -279,6 +257,12 @@ mod tests {
         // a file written before the option existed keeps the default
         let config: Config = toml::from_str(&toml.replace("check_updates = true", "")).unwrap();
         assert!(config.check_updates);
+    }
+
+    #[test]
+    fn removed_gui_theme_in_config_file_is_ignored() {
+        let toml = format!("gui_theme = \"Dark\"\n{}", toml_without_vaapi_and_wayland());
+        assert!(toml::from_str::<Config>(&toml).is_ok());
     }
 
     #[test]
@@ -329,5 +313,51 @@ mod tests {
         assert!(config.no_gui);
         assert!(config.try_vaapi);
         assert!(config.wayland_support);
+    }
+
+    #[test]
+    fn allowed_clients_default_to_empty_and_ask_to_off() {
+        let config = Config::try_parse_from(["weylus"]).unwrap();
+        assert!(config.allowed_clients.is_empty());
+        assert!(!config.ask_new_devices);
+    }
+
+    #[test]
+    fn allowed_clients_flag_is_comma_separated() {
+        let config =
+            Config::try_parse_from(["weylus", "--allowed-clients", "10.0.0.1,10.0.0.0/8"]).unwrap();
+        assert_eq!(config.allowed_clients, ["10.0.0.1", "10.0.0.0/8"]);
+    }
+
+    fn toml_without_allowed_clients() -> String {
+        toml_without_vaapi_and_wayland()
+            .lines()
+            .filter(|l| !l.starts_with("allowed_clients") && !l.starts_with("ask_new_devices"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn allowed_clients_are_read_from_config_file() {
+        let base = toml_without_allowed_clients();
+        let toml = format!("allowed_clients = [\"192.168.1.5\"]\nask_new_devices = true\n{base}");
+        let config: Config = toml::from_str(&toml).unwrap();
+        assert_eq!(config.allowed_clients, ["192.168.1.5"]);
+        assert!(config.ask_new_devices);
+        // a file written before the options existed keeps the defaults
+        let config: Config = toml::from_str(&base).unwrap();
+        assert!(config.allowed_clients.is_empty());
+        assert!(!config.ask_new_devices);
+    }
+
+    #[test]
+    fn persisted_allowed_clients_survive_update_from() {
+        let toml = format!(
+            "allowed_clients = [\"192.168.1.5\"]\n{}",
+            toml_without_allowed_clients()
+        );
+        let mut config: Config = toml::from_str(&toml).unwrap();
+        config.update_from(["weylus", "--no-gui"]);
+        assert_eq!(config.allowed_clients, ["192.168.1.5"]);
     }
 }

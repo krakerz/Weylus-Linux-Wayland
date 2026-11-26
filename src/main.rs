@@ -18,11 +18,13 @@ use std::sync::mpsc;
 
 use config::{Config, get_config};
 
+mod access;
 mod capturable;
 mod cerror;
+mod clients;
 mod codec;
 mod config;
-mod gui;
+mod desktop;
 mod input;
 mod log;
 mod protocol;
@@ -33,6 +35,16 @@ mod websocket;
 mod weylus;
 
 fn main() {
+    // Detect before an update can replace the binary: afterwards /proc/self/exe reads "(deleted)".
+    let install_kind = update::install_kind();
+    if matches!(install_kind, update::InstallKind::AppImage { .. })
+        && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+    {
+        // WebKitGTK's DMA-BUF renderer shows a blank window on some driver/compositor combinations.
+        // SAFETY: no other thread exists yet, so nothing reads the environment concurrently.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+
     let (sender, receiver) = mpsc::sync_channel::<String>(100);
 
     log::setup_logging(sender);
@@ -66,8 +78,6 @@ fn main() {
         return;
     }
 
-    // Detect before an update can replace the binary: afterwards /proc/self/exe reads "(deleted)".
-    let install_kind = update::install_kind();
     info!(
         "Weylus {} ({})",
         update::current_version(),
@@ -96,11 +106,18 @@ fn main() {
             });
         }
         let mut weylus = crate::weylus::Weylus::new();
-        weylus.start(&conf, |msg| match msg {
+        if !weylus.start(&conf, |msg| match msg {
             web::Web2UiMessage::UInputInaccessible => {
                 warn!(std::include_str!("strings/uinput_error.txt"))
             }
-        });
+            // without a window nobody can answer; dropping the reply refuses the device
+            web::Web2UiMessage::ApproveClient(_)
+            | web::Web2UiMessage::ApprovalExpired(_)
+            | web::Web2UiMessage::ClientsChanged(_) => {}
+        }) {
+            error!("Weylus failed to start, see the log above.");
+            std::process::exit(1);
+        }
         {
             let mut signals = Signals::new(TERM_SIGNALS).unwrap();
             let sig = signals.forever().next().expect("signal iterator ended");
@@ -120,7 +137,7 @@ fn main() {
             weylus.stop();
         }
     } else {
-        gui::run(&conf, receiver);
+        desktop::run(conf, receiver);
         update::spawn_pending_relaunch();
     }
 }

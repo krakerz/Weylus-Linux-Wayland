@@ -1460,8 +1460,25 @@ function apply_view_transform() {
     video.style.transform = "translate(" + view_tx + "px, " + view_ty + "px) scale(" +
         view_base_sx * view_zoom + ", " + view_base_sy * view_zoom + ")";
     let out = document.getElementById("zoom_level") as HTMLOutputElement | null;
-    if (out)
-        out.value = Math.round(view_zoom * 100) + "%";
+    if (out) {
+        let level = Math.round(view_zoom * 100) + "%";
+        if (out.value != level)
+            wake_zoom_controls();
+        out.value = level;
+    }
+}
+
+const ZOOM_CONTROLS_IDLE_MS = 3000;
+let zoom_controls_timer: number | undefined;
+
+// Shows the zoom controls and collapses them to the grip after a while without use.
+function wake_zoom_controls() {
+    let controls = document.getElementById("zoom_controls");
+    if (!controls)
+        return;
+    controls.classList.remove("collapsed");
+    window.clearTimeout(zoom_controls_timer);
+    zoom_controls_timer = window.setTimeout(() => controls.classList.add("collapsed"), ZOOM_CONTROLS_IDLE_MS);
 }
 
 // Scale the view by r while the content point under (ox, oy) moves to (nx, ny) (client coordinates).
@@ -1497,6 +1514,14 @@ function init_view_controls(video: HTMLElement) {
         document.getElementById("zoom_in").onclick = () => step(VIEW_ZOOM_STEP);
         document.getElementById("zoom_out").onclick = () => step(1 / VIEW_ZOOM_STEP);
         document.getElementById("zoom_reset").onclick = () => reset_view();
+        // Open from the grip on click, not pointerdown: expanding on pointerdown would move a zoom
+        // button under the finger and the click would land on it.
+        document.getElementById("zoom_grip").onclick = () => wake_zoom_controls();
+        controls.addEventListener("pointerdown", () => {
+            if (!controls.classList.contains("collapsed"))
+                wake_zoom_controls();
+        });
+        wake_zoom_controls();
     }
     apply_view_transform();
 

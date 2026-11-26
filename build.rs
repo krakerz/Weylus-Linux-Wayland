@@ -21,12 +21,19 @@ fn probe(name: &str, min_version: &str) -> pkg_config::Library {
         })
 }
 
-fn build_js() {
-    println!("cargo:rerun-if-changed=ts/lib.ts");
+fn run_tsc(sources: &[&str], output: &str, project: Option<&str>) {
+    for source in sources {
+        println!("cargo:rerun-if-changed={source}");
+    }
 
     let js_needs_update = || -> Result<bool, Box<dyn std::error::Error>> {
-        Ok(Path::new("ts/lib.ts").metadata()?.modified()?
-            > Path::new("www/static/lib.js").metadata()?.modified()?)
+        let output_time = Path::new(output).metadata()?.modified()?;
+        for source in sources {
+            if Path::new(source).metadata()?.modified()? > output_time {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }()
     .unwrap_or(true);
     if !js_needs_update {
@@ -39,6 +46,9 @@ fn build_js() {
     } else {
         Command::new("tsc")
     };
+    if let Some(project) = project {
+        tsc_command.args(["-p", project]);
+    }
     match tsc_command.status() {
         Err(err) => {
             println!(
@@ -64,7 +74,17 @@ fn main() {
         panic!("Weylus supports Linux only.");
     }
 
-    build_js();
+    run_tsc(&["ts/lib.ts"], "www/static/lib.js", None);
+    run_tsc(
+        &["ts/desktop/app.ts", "ts/desktop/tauri.d.ts"],
+        "ui/app.js",
+        Some("tsconfig.desktop.json"),
+    );
+    // generate_context! embeds these at compile time.
+    for file in ["ui/index.html", "ui/style.css", "tauri.conf.json"] {
+        println!("cargo:rerun-if-changed={file}");
+    }
+    tauri_build::build();
 
     let libs = [
         probe("libavcodec", MIN_LIBAVCODEC),
