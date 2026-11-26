@@ -56,8 +56,9 @@ Needed to run Weylus.
 - `uinput` access for pen, touch and mouse input (see [uinput](#uinput))
 - Optional, for hardware encoding: a VA-API driver (Mesa or Intel media driver) for H.264/H.265/AV1,
   or an NVIDIA GPU with its driver for NVENC (`--try-nvenc`)
-- The shared libraries of FFmpeg 6.1 or newer (libavcodec, libavformat, libavfilter, libavutil) and
-  libva, GStreamer and D-Bus, which the binary links against
+- libva, GStreamer and D-Bus, which the binary links against; when built from source also the shared
+  libraries of FFmpeg 6.1 or newer (libavcodec, libavformat, libavfilter, libavutil). The release
+  downloads include FFmpeg
 
 Package names:
 
@@ -115,8 +116,14 @@ distribution's default FFmpeg usually lacks the H.264 encoders Weylus needs. Thi
 required, but was not checked on these distributions.
 
 ## Installation
-Weylus is built from source; there are no prebuilt packages from this fork. Install the
-[Dependencies](#dependencies), then follow [Building from source](#building-from-source).
+Download a release from the [releases page](https://github.com/krakerz/Weylus/releases) (x86_64; Ubuntu
+24.04, Debian 13 or newer, current Fedora, Arch and openSUSE):
+- `Weylus-<version>-x86_64.AppImage`: make it executable (`chmod +x`) and run it.
+- `weylus-v<version>-linux-x86_64.tar.gz`: unpack it and run `./install.sh` (installs to `~/.local`;
+  `./install.sh --uninstall` removes it). `INSTALL.txt` in the archive lists the runtime packages.
+
+Both include FFmpeg; install the other [Runtime](#runtime) dependencies. To build Weylus yourself,
+follow [Building from source](#building-from-source).
 
 Tablet: no app is needed. Use a browser with WebCodecs: iPadOS 16.4 or newer with Safari, or a current
 Chrome or Firefox. H.265 and AV1 need a client that can decode them (AV1 needs a recent iPad, for

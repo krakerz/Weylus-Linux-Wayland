@@ -6,3 +6,4 @@ c_helper/Cargo.lock
 *.js.map
 *.tar.gz
 /node_modules
+/dist/

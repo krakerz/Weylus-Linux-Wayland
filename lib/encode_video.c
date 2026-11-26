@@ -249,7 +249,7 @@ void init_scaler(
 	}
 
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 39, 100) && \
-	LIBAVFILTER_VERSION_INT >= AV_VERSION_INT(10, 4, 100)
+	LIBAVFILTER_VERSION_INT >= AV_VERSION_INT(10, 6, 100)
 	ret = av_opt_set_array(
 		ctx->buffersink_scale_ctx,
 		"pixel_formats",
@@ -259,7 +259,7 @@ void init_scaler(
 		AV_OPT_TYPE_PIXEL_FMT,
 		&pix_fmt_out);
 #else
-	// FFmpeg < 7.1: only the binary "pix_fmts" option exists (removed in FFmpeg 8).
+	// libavfilter < 10.6 (FFmpeg 7.1 and older): only the binary "pix_fmts" option exists (removed in FFmpeg 8).
 	enum AVPixelFormat sink_pix_fmts[] = {pix_fmt_out, AV_PIX_FMT_NONE};
 	ret = av_opt_set_int_list(
 		ctx->buffersink_scale_ctx,

@@ -11,6 +11,7 @@
 - Zoom and pan for the video view: +/− and reset buttons, and pinch or drag with fingers when touch input is off
 - A chosen codec the device can't decode switches to Auto automatically
 - The screen share is remembered until Weylus restarts, so reloading the page no longer asks for the screen again (`--no-remember-screen` turns this off)
+- Prebuilt Linux downloads on the releases page: an AppImage and a tar.gz with an install script, both with FFmpeg included
 
 ### Changed
 - Weylus builds against the system's FFmpeg and libva instead of bundled copies

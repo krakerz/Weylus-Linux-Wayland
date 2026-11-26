@@ -329,8 +329,6 @@ class Settings {
             for (const n of names)
                 if (n)
                     this.decodable.add(n);
-            // the server only sees WARN and up, and the socket may not be open yet: onopen logs the result again
-            log(LogLevel.WARN, "Decodable video codecs: " + [...this.decodable].join(", "));
         });
     }
 
@@ -355,7 +353,7 @@ class Settings {
         if (label == this.last_codec_label)
             return;
         this.last_codec_label = label;
-        log(LogLevel.WARN, "Active video codec: " + label);
+        log(LogLevel.INFO, "Active video codec: " + label);
         let wanted = names[this.codec_list()[0]];
         if (label != wanted)
             log(LogLevel.WARN, "Server uses " + label + " instead of " + wanted);
@@ -1200,7 +1198,7 @@ function handle_messages(
             if (n > 0)
                 new_config.description = new Uint8Array(buf, 13 + s, n).slice();
             config = new_config;
-            log(LogLevel.WARN, "Video codec: " + codec);
+            log(LogLevel.INFO, "Video codec: " + codec);
             if (first) {
                 let c = config;
                 VideoDecoder.isConfigSupported(c).then((r) => {
@@ -1397,9 +1395,8 @@ function init() {
         if (!settings.video_enabled())
             webSocket.send('"PauseVideo"');
 
-        // the probe result is logged here (not in the probe) so it reaches the server log: the socket is open now
         settings.codecs_probed.then(() => {
-            log(LogLevel.WARN, "Decodable video codecs: " + [...settings.decodable].join(", "));
+            log(LogLevel.INFO, "Decodable video codecs: " + [...settings.decodable].join(", "));
             settings.send_server_config();
         });
 
