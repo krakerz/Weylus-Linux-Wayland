@@ -302,6 +302,11 @@ async fn run_server(
 
         debug!(address = ?remote_address, "Client connected.");
 
+        if let Err(err) = tcp.set_nodelay(true) {
+            warn!("Failed to set TCP_NODELAY: {err}.");
+        }
+        limit_unsent_bytes(&tcp);
+
         let io = TokioIo::new(tcp);
 
         let sender_ui = sender_ui.clone();
@@ -364,5 +369,31 @@ async fn run_server(
                 semaphore_websocket_shutdown.add_permits(num_clients.load(Ordering::Relaxed));
             },
         }
+    }
+}
+
+/// Unsent bytes the kernel may hold per socket; beyond this, writes wait, so the video backlog
+/// counter in websocket.rs sees a slow link instead of an ever-growing send buffer.
+const TCP_NOTSENT_LOWAT_BYTES: libc::c_int = 128 * 1024;
+
+fn limit_unsent_bytes(tcp: &tokio::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: the fd is valid for the duration of the call and optval points to a live c_int of
+    // the given size.
+    let ret = unsafe {
+        libc::setsockopt(
+            tcp.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_NOTSENT_LOWAT,
+            (&TCP_NOTSENT_LOWAT_BYTES as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        warn!(
+            "Failed to set TCP_NOTSENT_LOWAT: {}.",
+            std::io::Error::last_os_error()
+        );
     }
 }

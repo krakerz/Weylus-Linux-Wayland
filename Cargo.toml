@@ -25,6 +25,7 @@ http-body-util = "0.1.2"
 hyper = { version = "^1.4", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1.8", features = ["tokio"] }
 image = { version = "^0.25", features = ["png"], default-features = false }
+libc = "0.2"
 percent-encoding = "2.1.0"
 pnet_datalink = "^0.35"
 qrcode = "0.15"

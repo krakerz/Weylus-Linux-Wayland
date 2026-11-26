@@ -1,93 +1,128 @@
 # Weylus
-![Build](https://github.com/H-M-H/Weylus/workflows/Build/badge.svg)
 
-Weylus turns your tablet or smart phone into a graphic tablet/touch screen for your computer!
+Weylus turns your tablet into a graphic tablet, touch screen and mouse for your Linux desktop.
 
-Weylus in action with [Xournal++](https://github.com/xournalpp/xournalpp):
+This is a fork of [H-M-H/Weylus](https://github.com/H-M-H/Weylus), maintained at
+[krakerz/Weylus](https://github.com/krakerz/Weylus). It supports Wayland only.
+
+## Table of Contents
+* [Description](#description)
+* [Features](#features)
+* [Dependencies](#dependencies)
+    * [Runtime](#runtime)
+    * [Build](#build)
+* [Installation](#installation)
+    * [uinput](#uinput)
+* [Building from source](#building-from-source)
+* [Usage](#usage)
+    * [Command line options](#command-line-options)
+    * [Environment variables](#environment-variables)
+    * [Settings panel](#settings-panel)
+    * [Encryption](#encryption)
+* [FAQ](#faq)
+* [License](#license)
+
+## Description
+Weylus runs a small web server on your computer. Open the address it shows in the browser of your
+tablet, and the tablet becomes a pen tablet, touch surface and mouse for your computer. The screen
+is mirrored to the tablet as a low-latency video stream (WebCodecs), and pen, touch, mouse and
+keyboard events are sent back to the computer and injected through `uinput`.
 
 ![Weylus in action](In_action.gif)
 
-## Table of Contents
-* [Features](#features)
-* [Installation](#installation)
-    * [Packages](#packages)
-* [Running](#running)
-    * [Fullscreen](#fullscreen)
-    * [Keyboard Input](#keyboard-input)
-    * [Automation](#automation)
-    * [Linux](#linux)
-        * [Wayland](#wayland)
-        * [Hardware Acceleration](#hardware-acceleration)
-        * [Weylus as Second Screen](#weylus-as-second-screen)
-            * [Dummy Plugs](#dummy-plugs)
-            * [Other Options](#other-options)
-        * [Encryption](#encryption)
-* [Building](#building)
-* [How does this work?](#how-does-this-work)
-    * [Stylus/Touch](#stylustouch)
-    * [Screen mirroring & window capturing](#screen-mirroring--window-capturing)
-* [FAQ](#faq)
-
 ## Features
-- Control your mouse with your tablet
-- Mirror your screen to your tablet
-- Send keyboard input using physical keyboards
-- Hardware accelerated video encoding
+- Pen (stylus) input as a tablet device with pressure and tilt, through `uinput`
+- Multi-touch input
+- Mouse and physical keyboard input
+- Screen mirroring of a Wayland screen via `xdg-desktop-portal` and PipeWire
+- Low-latency video in the browser with WebCodecs; late frames are dropped instead of building up delay
+- Video codecs H.264, H.265 and AV1; the Codec setting defaults to Auto, which picks the best codec the browser can decode and falls back to H.264
+- Hardware video encoding through VA-API, and NVENC with `--try-nvenc`; software encoding when neither is available
+- Bitrate, frame rate and maximum resolution settings
+- Zoom and pan of the video view: zoom buttons and reset, and pinch or drag with fingers when touch input is off
+- Fixed pen pressure mode for pencils without a pressure sensor
+- Screen share is remembered until Weylus restarts, so reloading the page does not ask for the screen again
+- Access code
+- Tablet as a second screen, using a virtual output such as a dummy plug
 
-The above features are available on all Operating Systems but Weylus works best on Linux. Additional
-features on Linux are:
-- Support for a stylus/pen (supports pressure and tilt)
-- Multi-touch: Try it with software that supports multi-touch, like Krita, and see for yourself!
-- Faster screen mirroring
-- Tablet as second screen
+## Dependencies
+
+### Runtime
+Needed to run Weylus.
+- A Wayland session with `xdg-desktop-portal` (ScreenCast interface) and PipeWire
+- An `xdg-desktop-portal` backend for your compositor: GNOME, KDE, wlroots-based (for example Sway)
+  or Hyprland
+- The GStreamer PipeWire plugin (provides the `pipewiresrc` element)
+- `uinput` access for pen, touch and mouse input (see [uinput](#uinput))
+- Optional, for hardware encoding: a VA-API driver (Mesa or Intel media driver) for H.264/H.265/AV1,
+  or an NVIDIA GPU with its driver for NVENC (`--try-nvenc`)
+- The shared libraries of FFmpeg 6.1 or newer (libavcodec, libavformat, libavfilter, libavutil) and
+  libva, GStreamer and D-Bus, which the binary links against
+
+Package names:
+
+| Distribution | Packages |
+|---|---|
+| Arch Linux | `pipewire xdg-desktop-portal gst-plugin-pipewire mesa libva-utils` (verified with `pacman -Si`), plus one portal backend: `xdg-desktop-portal-gnome`, `xdg-desktop-portal-kde`, `xdg-desktop-portal-wlr` or `xdg-desktop-portal-hyprland`; for Intel GPUs `intel-media-driver` |
+| Ubuntu 24.04 / Debian 13 | the libraries from the Build list plus `pipewire xdg-desktop-portal gstreamer1.0-pipewire mesa-va-drivers` and one portal backend: `xdg-desktop-portal-gnome`, `xdg-desktop-portal-kde` or `xdg-desktop-portal-wlr` (no Hyprland portal package in these releases); for Intel GPUs `intel-media-va-driver` |
+| Fedora, openSUSE | the equivalents of the packages above; use the pkg-config names in [Build](#build) to find the libraries |
+
+### Build
+Needed to compile Weylus, in addition to the runtime dependencies.
+
+Tools:
+- Rust 1.92 or newer, installed with [rustup](https://rustup.rs). Distribution Rust packages are often
+  older; the required version is `rust-version` in `Cargo.toml`.
+- Node.js with npm (builds the TypeScript web client)
+- pkg-config
+- A C compiler (gcc or clang) and CMake
+
+Libraries, found through pkg-config (their development files must be installed):
+- FFmpeg 6.1 or newer: `libavcodec` (≥ 60.31.102), `libavformat` (≥ 60.16.100), `libavfilter`
+  (≥ 9.12.100), `libavutil` (≥ 58.29.100)
+- `libva` ≥ 1.20.0
+- GStreamer 1.0 with `gstreamer-app-1.0`, `gstreamer-video-1.0` and the base plugins
+  (`gstreamer-plugins-base-1.0`)
+- `dbus-1`
+- Wayland (`wayland-client`, `wayland-protocols`) and `xkbcommon`
+- X11, GL and Pango development files: the build still links the X11 and Pango libraries listed in
+  the Ubuntu/Debian and Arch package lists below; Weylus does not use X11 at runtime
+
+Package names:
+
+**Ubuntu 24.04 or Debian 13** (exact list from the project's CI build script):
+```sh
+sudo apt install build-essential pkg-config cmake nodejs npm curl ca-certificates \
+libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libva-dev \
+libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libdbus-1-dev \
+libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev libxrender-dev libxfixes-dev \
+libpango1.0-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev wayland-protocols libxkbcommon-dev
+```
+`curl` and `ca-certificates` are only needed to install Rust with rustup.
+
+**Arch Linux** (verified with `pacman -Si`):
+```sh
+sudo pacman -S --needed base-devel pkgconf cmake nodejs npm rustup ffmpeg libva gstreamer \
+gst-plugins-base-libs dbus wayland wayland-protocols libxkbcommon libx11 libxext libxfixes \
+libxinerama libxcursor libxft libxrender pango mesa glu
+```
+Then `rustup default stable` (any Rust 1.92 or newer works).
+
+**Fedora and openSUSE:** the package names differ, so install the development packages that provide
+the libraries above. Check with `pkg-config --modversion libavcodec libva gstreamer-1.0 dbus-1
+wayland-client xkbcommon`. Use the full FFmpeg from RPM Fusion (Fedora) or Packman (openSUSE): the
+distribution's default FFmpeg usually lacks the H.264 encoders Weylus needs. This is usually
+required, but was not checked on these distributions.
 
 ## Installation
-Just grab the latest release for your OS from the
-[releases page](https://github.com/H-M-H/Weylus/releases) and install it on your computer. No apps
-except a modern browser (Firefox 80+, iOS/iPadOS 13+) are required on your tablet. **If you run
-Linux make sure to follow the instructions described [here](#linux) to enable uinput for features
-like pressure sensitivity and multitouch!**
+Weylus is built from source; there are no prebuilt packages from this fork. Install the
+[Dependencies](#dependencies), then follow [Building from source](#building-from-source).
 
-### Packages
-AUR packages for Weylus are available here:
-- From source: [weylus](https://aur.archlinux.org/packages/weylus/)
-- Prebuilt binary: [weylus-bin](https://aur.archlinux.org/packages/weylus-bin/)
+Tablet: no app is needed. Use a browser with WebCodecs: iPadOS 16.4 or newer with Safari, or a current
+Chrome or Firefox. H.265 and AV1 need a client that can decode them (AV1 needs a recent iPad, for
+example one with M3, M4 or A17 Pro); Auto picks a codec the client supports.
 
-## Running
-Start Weylus, preferably set an access code in the access code box and press the Start button. This
-will start a webserver running on your computer. To control your computer with your tablet you need
-to open the url `http://<address of your computer>:<port set in the menu, default is 1701>`, if
-possible Weylus will display to you the url you need to open and show a QR code with the encoded
-address. If you have a firewall running make sure to open a TCP port for the webserver (1701 by
-default) and the websocket connection (9001 by default).
-
-On many Linux distributions this is done with ufw:
-```
-sudo ufw allow 1701/tcp
-sudo ufw allow 9001/tcp
-```
-
-Please only run Weylus in networks you trust as there is no encryption to enable minimal latencies.
-
-### Fullscreen
-You may want to add a bookmark to your home screen on your tablet as this enables running Weylus in
-full screen mode (on iOS/iPadOS this needs to be done with Safari). If you are not on iOS/iPadOS
-there is a button to toggle full screen mode.
-
-### Keyboard Input
-Weylus supports keyboard input for physical keyboards, so if you have a Bluetooth keyboard, just
-connect it to your tablet and start typing. Due to technical limitations onscreen keyboards are not
-supported.
-
-### Automation
-Weylus provides some features to make automation as convenient as possible. There is a command-line
-interface; `--no-gui` for example starts Weylus in headless mode without a gui. For more options see
-`weylus --help`. If you want to run a specific script e.g., once a client connects to your computer
-you can do so by parsing the log Weylus generates. You may want to enable more verbose logging by
-setting the environment variable `WEYLUS_LOG_LEVEL` to `DEBUG` or `TRACE` as well as
-`WEYLUS_LOG_JSON` to `true` to enable easily parseable JSON logging.
-
-### Linux
+### uinput
 Weylus uses the `uinput` interface to simulate input events on Linux. **To enable stylus and
 multi-touch support `/dev/uinput` needs to be writable by Weylus.** To make `/dev/uinput`
 permanently writable by your user, run:
@@ -114,178 +149,136 @@ sudo rm /etc/udev/rules.d/60-weylus.rules
 This allows your user to synthesize input events system-wide, even when another user is logged in.
 Therefore, untrusted users should not be added to the uinput group.
 
-#### Wayland
-Weylus captures the screen on Wayland through `xdg-desktop-portal` and PipeWire. This is enabled by
-default, pass `--no-wayland` to turn it off. Installing `pipewire` and `xdg-desktop-portal` as
-well as one of:
-- `xdg-desktop-portal-gtk` for GNOME
-- `xdg-desktop-portal-kde` for KDE
-- `xdg-desktop-portal-wlr` for wlroots-based compositors like Sway
-is required.
-
-There are still some things that do not work:
-- input mapping for windows
-- displaying proper window names
-- capturing the cursor
-
-#### Hardware Acceleration
-On Linux Weylus supports hardware accelerated video encoding through the Video Acceleration API
-(VAAPI) or Nvidia's NVENC. VAAPI is enabled by default and Weylus falls back to software encoding
-if it can not be used; pass `--no-vaapi` to turn it off. NVENC has to be enabled with `--try-nvenc`.
-If VAAPI is used it is possible to select a specific driver by setting the
-environment variable `LIBVA_DRIVER_NAME`. You can find possible values with the command
-`ls /usr/lib/dri/ | sed -n 's/^\(\S*\)_drv_video.so$/\1/p'`. On some distributions the drivers may
-not reside in `/usr/lib/dri` but for example in `/usr/lib/x86_64-linux-gnu/dri` and may not be found
-by Weylus. To force Weylus to search another directory for drivers, the environment variable
-`LIBVA_DRIVERS_PATH` can be set.
-Additionally you can specify the VAAPI device to use by setting `WEYLUS_VAAPI_DEVICE`; by default
-devices can be found in `/dev/dri`. On some systems this is not optional and this variable must be
-set. If VAAPI doesn't work out of the box for you, have a look into `/dev/dri`, often setting
-`WEYLUS_VAAPI_DEVICE=/dev/dri/renderD129` is already the solution. Note that you may need to install
-the driver(s) first.
-
-Nvidias NVENC is very fast but delivers a video stream of noticeably lower quality (at least on my
-GeForce GTX 1050 Mobile GPU) but more recent GPUs should provide higher quality. For this to work
-nvidia drivers need to be installed.
-
-#### Weylus as Second Screen
-There are a few possibilities to use Weylus to turn your tablet into a second screen.
-
-##### Dummy Plugs
-Weylus detects if you use multiple monitors and you can select the one you want to mirror. So if you
-want to use Weylus as a second screen you could just buy another monitor. Obviously this is
-pointless as if you already bought that monitor, there is no need to use Weylus! This is where so
-called **HDMI/Displayport/VGA Dummy Plugs** come in handy. These are small devices that pretend to
-be a monitor but only cost a fraction of the price of an actual monitor.
-
-Once you have bought one and plugged it into your computer you can configure an additional screen
-just like you would do with an actual one and then use Weylus to mirror this virtual screen.
-
-##### Other Options
-The following is untested/incomplete, feel free to do more research and open a pull request to
-expand documentation on this!
-- On Wayland with sway there is `create_output` which can be used to [create headless
-  outputs](https://github.com/swaywm/sway/releases/tag/1.5), unfortunately it is not documented how
-  to actually do that: https://github.com/swaywm/sway/issues/5553
-- On Wayland with GNOME recently there has been added an option to [create virtual monitors with
-  mutter](https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/1698)
-
-#### Encryption
-By default Weylus comes without encryption and should only be run on networks you trust. If this is
-not the case it's strongly advised to set up a TLS proxy. One option is to use
-[hitch](https://hitch-tls.org/), an example script that sets up encryption is located at
-`weylus_tls.sh`.
-But any TLS proxy should work just fine.
-
-Note that the mentioned script works by creating a self-signed certificate. This means your browser
-will most likely display a scary looking but completely unfounded message telling you how incredibly
-dangerous it is to trust the certificate you yourself just created; this can be safely ignored!
-
-In case you are using Firefox: There is a [bug](https://bugzilla.mozilla.org/show_bug.cgi?id=1187666)
-that prevents users from accepting self-signed certificates for websocket connections. A workaround
-is to directly open the websocket connection via the URL bar and accept the certificate there. After
-accepting the connection will of course fail as the browser expects https and not wss as protocol.
-
-Sadly this solution is anything but frictionless and I am unhappy with the current state of affairs.
-This is also another reason why encryption is not enabled by default, self-signed certificates are
-just too painful to handle nowadays. I'd gladly welcome any proposals to improve the situation!
-
-## Building
-Weylus only supports Linux. To build it you need Rust (install it with [rustup](https://rustup.rs); distribution packages are often older than
-the required version, see `rust-version` in Cargo.toml), Node.js with npm, pkg-config, a C compiler,
-FFmpeg 6.1 or newer (libavcodec, libavformat, libavfilter and libavutil) and libva with their
-development files, GStreamer with its base plugins' development files, dbus, and the
-dependencies required to build fltk (cmake, pango, cairo, wayland, libxkbcommon, libx11, libxext,
-libxinerama, libxcursor, libxft, libxfixes, libxrender). On Arch Linux, for example:
-```sh
-sudo pacman -S --needed base-devel rust ffmpeg libva libx11 libxext libxfixes dbus gstreamer \
-gst-plugins-base-libs cmake wayland wayland-protocols libxkbcommon pango cairo libxinerama \
-libxcursor libxft nodejs npm
-```
-On Ubuntu 24.04 or Debian 13:
-```sh
-sudo apt install build-essential pkg-config cmake libavcodec-dev libavformat-dev libavfilter-dev \
-libavutil-dev libva-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libdbus-1-dev \
-libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev libxrender-dev libxfixes-dev \
-libpango1.0-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev wayland-protocols \
-libxkbcommon-dev nodejs npm
-```
-On Fedora and openSUSE use the full FFmpeg from RPM Fusion / Packman; the distribution's
-ffmpeg-free lacks the H.264 encoders Weylus needs.
-Then build the project with:
+## Building from source
+Weylus only supports Linux. With the [Build](#build) dependencies installed, run:
 ```sh
 npm install && cargo build --release
 ```
+`npm install` is needed once; it installs the TypeScript compiler used by the build. The binary is
+then at `target/release/weylus`.
 
-## How does this work?
-### Stylus/Touch
-Modern browsers expose so called
-[PointerEvents](https://developer.mozilla.org/en-US/docs/Web/API/PointerEvent) that can convey not
-only mouse but additionally stylus/pen and touch information. Weylus sets up a webserver with the
-corresponding javascript code to capture these events. The events are sent back to the server using
-websockets.
-Weylus then processes these events using the uinput backend. It makes use of the
-uinput Linux kernel module which supports creating a wide range of input devices including mouse,
-stylus and touch input devices.
+## Usage
+Start Weylus, then open the address it displays on your tablet. Both devices must be on the same
+network. Weylus shows the address and a QR code in its window. The default address is
+`http://<address of your computer>:1701`.
 
-### Screen mirroring & window capturing
-Weylus captures the screen on Wayland only: `xdg-desktop-portal` and PipeWire provide the stream
-and GStreamer receives it. The images captured are
-then encoded to a video stream using ffmpeg. Fragmented MP4 is used as container format to enable
-browsers to play the stream via the Media Source Extensions API. The video codec used is H.264 as
-this is widely supported and allows very fast encoding as opposed to formats like AV1. To minimize
-dependencies ffmpeg is statically linked into Weylus.
+1. Start Weylus, from the GUI or headless: `./target/release/weylus --no-gui --auto-start`.
+2. Optionally set an access code (`--access-code`) in the GUI, or on the command line.
+3. Open the shown URL on the tablet.
+4. Pick the screen to share in the screen-share dialog of your desktop. The dialog appears once per
+   server run, because the screen share is remembered until Weylus restarts (`--no-remember-screen`
+   asks on every connection).
+5. Use the pen, touch or keyboard on the tablet. Keyboard input works with physical keyboards only;
+   onscreen keyboards are not supported.
+
+If a firewall is running, open the web port (1701/tcp by default); the video and input websocket
+runs on the same port (`/ws`). With `ufw`:
+```sh
+sudo ufw allow 1701/tcp
+```
+
+### Command line options
+Run `weylus --help` for the full list. The important options:
+
+| Option | Effect |
+|---|---|
+| `--no-gui` | Run without the GUI and start immediately (headless) |
+| `--auto-start` | Start the server immediately on program start |
+| `--access-code <CODE>` | Require an access code on the tablet |
+| `--web-port <PORT>` | Port of the web server (default `1701`) |
+| `--bind-address <ADDR>` | Address to bind to (default `0.0.0.0`) |
+| `--no-wayland` | Do not capture through `xdg-desktop-portal`/PipeWire (Wayland capture is on by default) |
+| `--no-vaapi` | Do not use VA-API hardware encoding (on by default; falls back to software) |
+| `--try-nvenc` | Try NVIDIA's NVENC for GPU encoding |
+| `--no-remember-screen` | Ask for the screen on every connection instead of remembering it until restart |
+| `--gui-theme <THEME>` | Theme of the GUI |
+| `--completions <SHELL>` | Print shell completions for bash, elvish, fish, powershell or zsh |
+
+### Environment variables
+- `WEYLUS_LOG_LEVEL`: log level, for example `DEBUG` or `TRACE`
+- `WEYLUS_LOG_JSON`: set to any value to print logs as JSON, which is easier to parse in scripts
+- `WEYLUS_PEN_LINGER=0`: turns off the pen-linger fix for Qt applications (pen strokes are joined by
+  straight lines again)
+- `LIBVA_DRIVER_NAME`: select a VA-API driver. The available drivers are in `/usr/lib/dri`
+  (`ls /usr/lib/dri/ | sed -n 's/^\(\S*\)_drv_video.so$/\1/p'`)
+- `LIBVA_DRIVERS_PATH`: directory to search for VA-API drivers, if they are not in `/usr/lib/dri`
+- `WEYLUS_VAAPI_DEVICE`: the VA-API device, for example `/dev/dri/renderD129`. Devices are in `/dev/dri`
+
+### Settings panel
+The settings panel in the browser (the handle at the side of the page):
+- **Capture**: the screen to mirror; `Refresh List` asks for the screen again.
+- **Video**: Enable Video, Energy Saving, Stretch Video, Toggle Fullscreen, Capture Cursor, Max Video
+  Resolution, Frame Rate, Bitrate (Auto keeps constant quality) and Codec (Auto, H.264, H.265 or AV1).
+  A codec the device cannot decode switches to Auto.
+- **Input**: Enable Mouse, Stylus, Touch and uinput; Pen pressure (from the device, or a fixed
+  value for pencils without pressure); Client Name.
+- At the bottom: the received frame rate and further display options.
+
+The zoom controls float at the bottom of the video: zoom out, zoom level, zoom in and reset. With
+Enable Touch off, pinch with two fingers to zoom and drag to pan; the pen keeps drawing.
+
+Capture Cursor: turning it on or off asks for the screen again, because it restarts the screen share.
+This is a limitation of the Wayland screen-share portal.
+
+### Encryption
+By default Weylus has no encryption and should only be run on networks you trust. If this is not the
+case, set up a TLS proxy. One option is [hitch](https://hitch-tls.org/); the script `weylus_tls.sh`
+in this repository sets one up with a self-signed certificate. Any TLS proxy works.
+
+A self-signed certificate makes the browser show a warning; this can be accepted. In Firefox, a
+[bug](https://bugzilla.mozilla.org/show_bug.cgi?id=1187666) prevents accepting a self-signed
+certificate for the websocket connection. A workaround is to open the websocket URL directly in the
+address bar and accept the certificate there.
 
 ## FAQ
-Q: Why does the page not load on my tablet and instead I get a timeout?<br>
-A: There probably is some kind of firewall running, make sure the ports Weylus uses are opened.
+Q: Why does the page not load on my tablet and I get a timeout?<br>
+A: A firewall is probably blocking the web port. Open it (1701 by default).
 
 Q: Why do I get the error `ERROR Failed to create uinput device: CError: code...`?<br>
-A: uinput is probably misconfigured, have you made sure to follow all instructions and logged out
-and in again? You may also be running a very old kernel that does not support the required features.
-In that case try to upgrade your system or use a newer one.
+A: `uinput` is not writable for your user. Follow the [uinput](#uinput) instructions and log out and
+in again. A very old kernel may also lack the required features.
 
-Q: Why is the "Capture" drop down empty and the screen not mirrored?<br>
-A: It is possible that only the port for the webserver but not the websocket has been opened, check
-that both ports have been opened.
+Q: Why is the "Capture" list empty, or the screen is not mirrored?<br>
+A: Weylus captures through `xdg-desktop-portal` and PipeWire, so a portal backend for your
+compositor must be installed and running. What can be captured is decided by the portal; if the
+screen-share dialog was cancelled, press `Refresh List` to ask again.
 
-Q: Why can I not select any windows in the "Capture" drop down and only see the whole screen.<br>
-A: Weylus captures via xdg-desktop-portal and PipeWire, so what can be captured is decided by your
-desktop's portal; X11 is not supported.
+Q: Why can I not select single windows, only the whole screen?<br>
+A: The portal decides what can be captured. Weylus does not capture individual X11 windows.
 
-Q: Do I have to follow the instructions to setup Weylus as second screen too?<br>
-A: No, this is strictly optional.
+Q: Why is there no video, a black screen, or a long video delay?<br>
+A: Check the log for the video line `Video: <width>x<height>@<encoder> ...`. If the encoder is
+`h264_vaapi` (hardware), test with `--no-vaapi`; if it is still wrong, check the VA-API driver with
+`LIBVA_DRIVER_NAME`, `LIBVA_DRIVERS_PATH` and `WEYLUS_VAAPI_DEVICE`. Set `WEYLUS_LOG_LEVEL=DEBUG` to
+see more.
+
+Q: Why does the video not play on an older iPad with AV1?<br>
+A: Only recent iPads decode AV1. Set Codec to Auto, which falls back to a codec the device can decode.
+
+Q: Why is there no X11, Windows or macOS support?<br>
+A: This fork targets Linux on Wayland only. X11 capture and input, and Windows and macOS support,
+were removed.
+
+Q: Why are pen strokes joined by straight lines in Qt applications such as Krita?<br>
+A: This is fixed in this fork. `WEYLUS_PEN_LINGER=0` restores the previous behaviour.
+
+Q: Do I need a second screen to use Weylus?<br>
+A: No. Setting up a virtual or second screen is optional.
 
 Q: Why am I unable to connect my tablet to the URL displayed by Weylus?<br>
-A: It is possible that your computer and WiFi connected tablet are on different networks, make sure
-they are on the same network.
+A: The computer and the tablet must be on the same network. USB tethering and a tablet's WiFi hotspot
+also work, because Weylus only needs an IP connection between the two devices.
 
-Q: Why does this not run on Firefox for Android?<br>
-A: Actually it does, just make sure Firefox version 80+ is installed.
+Q: Can I use Weylus with an Android device over USB?<br>
+A: Forward the port with `adb`: `adb reverse tcp:1701 tcp:1701`.
+Then open `http://127.0.0.1:1701` on the device.
 
-Q: Why does this not run under Chrome on my iPad?<br>
-A: Chrome lacks some features for video streaming on iPadOS/iOS, try Firefox or Safari.
-
-Q: Why won't my cursor move in osu! ?<br>
-A: Try disabling raw input.
-
-Q: Can I use Weylus even if there is no WiFi?<br>
-A: Probably yes! Most tablets permit setting up a WiFi hotspot that can be used to connect your
-computer and tablet. Alternatively there is USB tethering too, which can be used to setup a peer to
-peer connection between your tablet and computer over USB. Another method for Android devices is to
-setup a socket connection with
-[adb](https://developer.android.com/studio/command-line/adb#Enabling):
-```console
-adb reverse tcp:1701 tcp:1701
-adb reverse tcp:9001 tcp:9001
-```
-Like that you can connect from your Android device to Weylus with the URL: `http://127.0.0.1:1701`.
-
-Weylus only requires that your devices
-are connected via the Internet Protocol and that doesn't necessarily imply WiFi.
+## License
+Weylus is licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later), see
+[LICENSE](LICENSE).
 
 ---
 
-[![Packaging status](
-https://repology.org/badge/vertical-allrepos/weylus.svg
-)](https://repology.org/project/weylus/versions)
+### Notes
+
+Built and maintained with the help of AI.

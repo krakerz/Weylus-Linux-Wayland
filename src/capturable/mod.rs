@@ -7,7 +7,8 @@ pub mod pipewire;
 pub mod remote_desktop_dbus;
 pub mod testsrc;
 
-pub trait Recorder {
+/// `Send` so a running recorder can be handed from one connection to the next.
+pub trait Recorder: Send {
     fn capture(&mut self) -> Result<crate::video::PixelProvider<'_>, Box<dyn Error>>;
 }
 

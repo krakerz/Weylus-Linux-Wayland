@@ -28,6 +28,7 @@ impl Weylus {
         let encoder_options = EncoderOptions {
             try_vaapi: config.try_vaapi,
             try_nvenc: config.try_nvenc,
+            ..Default::default()
         };
 
         let (sender_ui, mut receiver_ui) = tokio::sync::mpsc::channel(100);
@@ -49,6 +50,8 @@ impl Weylus {
             WeylusClientConfig {
                 encoder_options,
                 wayland_support: config.wayland_support,
+                // without the portal there is no session to remember
+                remember_screen: config.remember_screen && config.wayland_support,
                 no_gui: config.no_gui,
             },
         );

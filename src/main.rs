@@ -20,6 +20,7 @@ use config::{Config, get_config};
 
 mod capturable;
 mod cerror;
+mod codec;
 mod config;
 mod gui;
 mod input;
@@ -138,6 +139,7 @@ mod tests {
         let opts = video::EncoderOptions {
             try_vaapi: true,
             try_nvenc: true,
+            ..Default::default()
         };
         let mut encoder =
             video::VideoEncoder::new(width, height, width, height, |_| {}, opts).unwrap();
@@ -160,6 +162,7 @@ mod tests {
         let opts = video::EncoderOptions {
             try_vaapi: true,
             try_nvenc: false,
+            ..Default::default()
         };
         let mut encoder =
             video::VideoEncoder::new(WIDTH, HEIGHT, WIDTH, HEIGHT, |_| {}, opts).unwrap();
@@ -187,6 +190,7 @@ mod tests {
         let opts = video::EncoderOptions {
             try_vaapi: false,
             try_nvenc: false,
+            ..Default::default()
         };
         let mut encoder =
             video::VideoEncoder::new(WIDTH, HEIGHT, WIDTH, HEIGHT, |_| {}, opts).unwrap();
@@ -214,6 +218,7 @@ mod tests {
         let opts = video::EncoderOptions {
             try_vaapi: false,
             try_nvenc: true,
+            ..Default::default()
         };
         let mut encoder =
             video::VideoEncoder::new(WIDTH, HEIGHT, WIDTH, HEIGHT, |_| {}, opts).unwrap();

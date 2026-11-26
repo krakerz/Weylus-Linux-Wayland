@@ -97,6 +97,13 @@ pub struct Config {
     )]
     #[serde(default = "default_true", rename = "wayland")]
     pub wayland_support: bool,
+    #[arg(
+        long = "no-remember-screen",
+        action = clap::ArgAction::SetFalse,
+        help = "Don't remember the shared screen across page reloads; ask for it on every connection."
+    )]
+    #[serde(default = "default_true", rename = "remember_screen")]
+    pub remember_screen: bool,
 
     #[arg(long, help = "Print template of index.html served by Weylus.")]
     #[serde(skip)]
@@ -215,6 +222,31 @@ mod tests {
         let config = Config::try_parse_from(["weylus", "--no-vaapi", "--no-wayland"]).unwrap();
         assert!(!config.try_vaapi);
         assert!(!config.wayland_support);
+    }
+
+    #[test]
+    fn remember_screen_defaults_to_on() {
+        let config = Config::try_parse_from(["weylus"]).unwrap();
+        assert!(config.remember_screen);
+    }
+
+    #[test]
+    fn no_remember_screen_flag_turns_it_off() {
+        let config = Config::try_parse_from(["weylus", "--no-remember-screen"]).unwrap();
+        assert!(!config.remember_screen);
+    }
+
+    #[test]
+    fn remember_screen_is_read_from_config_file() {
+        let toml = toml_without_vaapi_and_wayland();
+        assert!(toml.contains("remember_screen = true"));
+        let config: Config =
+            toml::from_str(&toml.replace("remember_screen = true", "remember_screen = false"))
+                .unwrap();
+        assert!(!config.remember_screen);
+        // a file written before the option existed keeps the default
+        let config: Config = toml::from_str(&toml.replace("remember_screen = true", "")).unwrap();
+        assert!(config.remember_screen);
     }
 
     #[test]

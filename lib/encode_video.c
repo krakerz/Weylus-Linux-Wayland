@@ -5,8 +5,6 @@
 #include <libavcodec/avcodec.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
-#include <libavformat/avformat.h>
-#include <libavformat/avio.h>
 #include <libavutil/buffer.h>
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
@@ -27,6 +25,13 @@
 #endif
 
 const AVRational TIME_BASE = (AVRational){1, 1000};
+// must match Codec in src/codec/mod.rs (also the wire codec id)
+enum { CODEC_H264 = 0, CODEC_HEVC = 1, CODEC_AV1 = 2 };
+static const char* const CODEC_LABELS[] = {"H.264", "H.265", "AV1"};
+static const char* const VAAPI_ENCODERS[] = {"h264_vaapi", "hevc_vaapi", "av1_vaapi"};
+static const char* const NVENC_ENCODERS[] = {"h264_nvenc", "hevc_nvenc", "av1_nvenc"};
+// AV1 q index for constant quality, roughly H.264 qp 23
+#define AV1_VAAPI_QINDEX 120
 
 typedef struct ScaleContext
 {
@@ -48,7 +53,6 @@ typedef struct Scalers
 
 typedef struct VideoContext
 {
-	AVFormatContext* oc;
 	AVCodecContext* c;
 
 	// pointer to the frame to be encoded, one of frame_out in scalers.bgr0/rgb0/rgb
@@ -59,32 +63,25 @@ typedef struct VideoContext
 	AVBufferRef* hw_device_ctx;
 
 	AVPacket* pkt;
-	AVStream* st;
 	int width_out;
 	int height_out;
 	int width_in;
 	int height_in;
-	void* buf;
 	void* rust_ctx;
 	int pts;
 	int initialized;
 	int frame_allocated;
 	int try_vaapi;
 	int try_nvenc;
+	int bitrate_kbps;
+	int frame_rate;
+	int codec;
+	int force_keyframe;
 } VideoContext;
 
-// this is a rust function and lives in src/video.rs
-int write_video_packet(void* rust_ctx, const uint8_t* buf, int buf_size);
-
-// libavformat < 61 declares the AVIO write callback's buffer non-const.
-#if defined(FF_API_AVIO_WRITE_NONCONST) && FF_API_AVIO_WRITE_NONCONST
-static int avio_write_packet(void* opaque, uint8_t* buf, int buf_size)
-#else
-static int avio_write_packet(void* opaque, const uint8_t* buf, int buf_size)
-#endif
-{
-	return write_video_packet(opaque, buf, buf_size);
-}
+// this is a rust function and lives in src/video.rs; called once per encoded packet (Annex B)
+void write_video_packet(
+	void* rust_ctx, const uint8_t* buf, int buf_size, int64_t pts_ms, int keyframe);
 
 #if defined(__clang__) || defined(__GNUC__)
 void log_callback(__attribute__((unused)) void* _ptr, int level, const char* fmt_orig, va_list args)
@@ -146,12 +143,20 @@ void set_codec_params(VideoContext* ctx)
 	ctx->c->height = ctx->height_out;
 	ctx->c->time_base = TIME_BASE;
 	ctx->c->framerate = (AVRational){0, 1};
+	if (ctx->bitrate_kbps > 0)
+	{
+		// rate control budgets bits per frame; without a frame rate it assumes 1/time_base = 1000 fps
+		ctx->c->framerate = (AVRational){ctx->frame_rate > 0 ? ctx->frame_rate : 30, 1};
+		ctx->c->rc_max_rate = (int64_t)ctx->bitrate_kbps * 1000;
+		// 0.5 s of VBV: bounds how far a single frame can exceed the average (transfer latency)
+		ctx->c->rc_buffer_size = ctx->bitrate_kbps * 500;
+	}
 
 	ctx->c->gop_size = 12;
 	// no B-frames to reduce latency
 	ctx->c->max_b_frames = 0;
-	if (ctx->oc->oformat->flags & AVFMT_GLOBALHEADER)
-		ctx->c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+	// no global header: encoders then repeat SPS/PPS (VPS for HEVC) or the AV1 sequence header
+	// in-band before every keyframe (read by src/codec/)
 }
 
 void destroy_scale_ctx(ScaleContext* ctx)
@@ -522,6 +527,9 @@ void scale_frame(ScaleContext* ctx, Error* err)
 
 void open_video(VideoContext* ctx, Error* err)
 {
+	if (ctx->codec < CODEC_H264 || ctx->codec > CODEC_AV1)
+		ERROR(err, 1, "Invalid codec id: %d", ctx->codec);
+
 	if (ctx->width_out <= 1 || ctx->height_out <= 1)
 		ERROR(
 			err,
@@ -532,12 +540,6 @@ void open_video(VideoContext* ctx, Error* err)
 
 	const AVCodec* codec;
 	int ret;
-
-	avformat_alloc_output_context2(&ctx->oc, NULL, "mp4", NULL);
-	if (!ctx->oc)
-	{
-		ERROR(err, 1, "Could not find output format mp4.");
-	}
 
 	int using_hw = 0;
 
@@ -564,7 +566,7 @@ void open_video(VideoContext* ctx, Error* err)
 			}
 		}
 
-		codec = avcodec_find_encoder_by_name("h264_vaapi");
+		codec = avcodec_find_encoder_by_name(VAAPI_ENCODERS[ctx->codec]);
 		if (codec)
 		{
 			ctx->c = avcodec_alloc_context3(codec);
@@ -591,7 +593,19 @@ void open_video(VideoContext* ctx, Error* err)
 					ctx->c->pix_fmt = AV_PIX_FMT_VAAPI;
 					ctx->c->hw_frames_ctx = ctx->scalers.hw_frames_ctx;
 					av_opt_set(ctx->c->priv_data, "quality", "7", 0);
-					av_opt_set(ctx->c->priv_data, "qp", "23", 0);
+					if (ctx->bitrate_kbps > 0)
+					{
+						av_opt_set(ctx->c->priv_data, "rc_mode", "VBR", 0);
+						ctx->c->bit_rate = (int64_t)ctx->bitrate_kbps * 1000;
+					}
+					else if (ctx->codec == CODEC_AV1)
+					{
+						// av1_vaapi has no qp option; CQP takes base_q_idx (0-255) from global_quality
+						av_opt_set(ctx->c->priv_data, "rc_mode", "CQP", 0);
+						ctx->c->global_quality = AV1_VAAPI_QINDEX;
+					}
+					else
+						av_opt_set(ctx->c->priv_data, "qp", "23", 0);
 					// default 2 holds a finished packet until more frames arrive; frames only come
 					// on screen damage, so that adds a random delay
 					av_opt_set(ctx->c->priv_data, "async_depth", "1", 0);
@@ -619,7 +633,7 @@ void open_video(VideoContext* ctx, Error* err)
 	if (ctx->try_nvenc && !using_hw &&
 		av_hwdevice_ctx_create(&ctx->hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, NULL, NULL, 0) == 0)
 	{
-		codec = avcodec_find_encoder_by_name("h264_nvenc");
+		codec = avcodec_find_encoder_by_name(NVENC_ENCODERS[ctx->codec]);
 		if (codec)
 		{
 			ctx->c = avcodec_alloc_context3(codec);
@@ -651,6 +665,9 @@ void open_video(VideoContext* ctx, Error* err)
 					av_opt_set(ctx->c->priv_data, "rc", "cbr", 0);
 					av_opt_set(ctx->c->priv_data, "cq", "21", 0);
 					av_opt_set(ctx->c->priv_data, "delay", "0", 0);
+					av_opt_set(ctx->c->priv_data, "forced-idr", "1", 0);
+					if (ctx->bitrate_kbps > 0)
+						ctx->c->bit_rate = (int64_t)ctx->bitrate_kbps * 1000;
 					set_codec_params(ctx);
 
 					int ret = avcodec_open2(ctx->c, codec, NULL);
@@ -665,13 +682,17 @@ void open_video(VideoContext* ctx, Error* err)
 				}
 			}
 			else
-				log_debug("Could not allocate video codec context for 'h264_nvenc'!");
+				log_debug("Could not allocate video codec context for '%s'!", NVENC_ENCODERS[ctx->codec]);
 		}
 		else
-			log_debug("Codec 'h264_nvenc' not found!");
+			log_debug("Codec '%s' not found!", NVENC_ENCODERS[ctx->codec]);
 	}
 #endif
 
+
+	// HEVC/AV1 are hardware-only; src/video.rs then tries the client's next codec (H.264 last)
+	if (!using_hw && ctx->codec != CODEC_H264)
+		ERROR(err, 1, "No hardware encoder for %s could be opened", CODEC_LABELS[ctx->codec]);
 
 	if (!using_hw)
 	{
@@ -707,6 +728,7 @@ void open_video(VideoContext* ctx, Error* err)
 		av_opt_set(ctx->c->priv_data, "preset", "ultrafast", 0);
 		av_opt_set(ctx->c->priv_data, "tune", "zerolatency", 0);
 		av_opt_set(ctx->c->priv_data, "crf", "23", 0);
+		av_opt_set(ctx->c->priv_data, "forced-idr", "1", 0);
 		set_codec_params(ctx);
 
 		ret = avcodec_open2(ctx->c, codec, NULL);
@@ -717,28 +739,9 @@ void open_video(VideoContext* ctx, Error* err)
 		}
 	}
 
-	ctx->st = avformat_new_stream(ctx->oc, NULL);
-	avcodec_parameters_from_context(ctx->st->codecpar, ctx->c);
-
 	ctx->pkt = av_packet_alloc();
 	if (!ctx->pkt)
 		ERROR(err, 1, "Failed to allocate packet");
-
-	int buf_size = 1024 * 1024;
-	ctx->buf = av_malloc(buf_size);
-	ctx->oc->pb = avio_alloc_context(
-		ctx->buf, buf_size, AVIO_FLAG_WRITE, ctx->rust_ctx, NULL, avio_write_packet, NULL);
-	if (!ctx->oc->pb)
-		ERROR(err, 1, "Failed to allocate avio context");
-
-	AVDictionary* opt = NULL;
-
-	// enable writing fragmented mp4
-	av_dict_set(&opt, "movflags", "frag_custom+empty_moov+default_base_moof", 0);
-	ret = avformat_write_header(ctx->oc, &opt);
-	if (ret < 0)
-		log_warn("Video: failed to write header!");
-	av_dict_free(&opt);
 
 	if (av_pix_fmt_desc_get(ctx->c->pix_fmt)->flags & AV_PIX_FMT_FLAG_HWACCEL &&
 		ctx->c->hw_frames_ctx)
@@ -768,12 +771,8 @@ void destroy_video_encoder(VideoContext* ctx)
 {
 	if (ctx->initialized)
 	{
-		av_write_trailer(ctx->oc);
-		avio_context_free(&ctx->oc->pb);
-		avformat_free_context(ctx->oc);
 		avcodec_free_context(&ctx->c);
 		av_packet_free(&ctx->pkt);
-		av_free(ctx->buf);
 		destroy_scalers(&ctx->scalers);
 	}
 	if (ctx->hw_device_ctx)
@@ -789,6 +788,9 @@ void encode_video_frame(VideoContext* ctx, int millis, Error* err)
 		ERROR(err, 1, "Frame not initialized!");
 
 	frame->pts = millis;
+	// the scaler reuses its output frame, so the picture type must be reset every time
+	frame->pict_type = ctx->force_keyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+	ctx->force_keyframe = 0;
 
 	ret = avcodec_send_frame(ctx->c, frame);
 	if (ret < 0)
@@ -804,14 +806,17 @@ void encode_video_frame(VideoContext* ctx, int millis, Error* err)
 			ERROR(err, 1, "Error during encoding");
 		}
 
-		av_packet_rescale_ts(ctx->pkt, ctx->c->time_base, ctx->st->time_base);
-		av_write_frame(ctx->oc, ctx->pkt);
+		write_video_packet(
+			ctx->rust_ctx,
+			ctx->pkt->data,
+			ctx->pkt->size,
+			ctx->pkt->pts,
+			(ctx->pkt->flags & AV_PKT_FLAG_KEY) != 0);
 		av_packet_unref(ctx->pkt);
-
-		// new fragment on every frame for lowest latency
-		av_write_frame(ctx->oc, NULL);
 	}
 }
+
+void request_keyframe(VideoContext* ctx) { ctx->force_keyframe = 1; }
 
 const char* get_codec_name(VideoContext* ctx)
 {
@@ -825,7 +830,10 @@ VideoContext* init_video_encoder(
 	int width_out,
 	int height_out,
 	int try_vaapi,
-	int try_nvenc)
+	int try_nvenc,
+	int bitrate_kbps,
+	int frame_rate,
+	int codec)
 {
 	VideoContext* ctx = malloc(sizeof(VideoContext));
 	ctx->rust_ctx = rust_ctx;
@@ -838,6 +846,10 @@ VideoContext* init_video_encoder(
 	ctx->frame_allocated = 0;
 	ctx->try_vaapi = try_vaapi;
 	ctx->try_nvenc = try_nvenc;
+	ctx->bitrate_kbps = bitrate_kbps;
+	ctx->frame_rate = frame_rate;
+	ctx->codec = codec;
+	ctx->force_keyframe = 0;
 	ctx->hw_device_ctx = NULL;
 
 	// make sure all scalers are zero initialized so that destroy can always be called

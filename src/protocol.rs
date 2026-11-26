@@ -9,6 +9,12 @@ pub struct ClientConfiguration {
     pub max_height: usize,
     pub client_name: Option<String>,
     pub frame_rate: f64,
+    /// target video bitrate; 0 = encoder's constant-quality default
+    #[serde(default)]
+    pub bitrate_mbps: f64,
+    /// video codecs the client wants, best first (`h264`, `hevc`, `av1`); unknown names are ignored
+    #[serde(default)]
+    pub codecs: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -16,12 +22,19 @@ pub enum MessageInbound {
     PointerEvent(PointerEvent),
     WheelEvent(WheelEvent),
     KeyboardEvent(KeyboardEvent),
+    /// Reply with the remembered screen share if there is one, else open a new portal session.
     GetCapturableList,
+    /// Always open a new portal session (the screen picker shows again).
+    RefreshCapturableList,
     Config(ClientConfiguration),
     PauseVideo,
     ResumeVideo,
     RestartVideo,
+    RequestKeyframe,
     ChooseCustomInputAreas,
+    ClientLog(String),
+    /// sent before GetCapturableList/RefreshCapturableList: PipeWire fixes the cursor mode when the portal session starts
+    SetCaptureCursor(bool),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -189,6 +202,8 @@ pub trait WeylusSender {
     type Error: std::error::Error;
     fn send_message(&mut self, message: MessageOutbound) -> Result<(), Self::Error>;
     fn send_video(&mut self, bytes: &[u8]) -> Result<(), Self::Error>;
+    /// Video messages handed to `send_video` that haven't been written to the socket yet.
+    fn video_backlog(&self) -> usize;
 }
 
 pub trait WeylusReceiver: Iterator<Item = Result<MessageInbound, Self::Error>> {

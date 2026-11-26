@@ -527,7 +527,10 @@ fn on_start_response(
     if let Some(Some(t)) = r.results.get("restore_token").map(|t| t.as_str()) {
         context.restore_token = Some(t.to_string());
     }
-    dbg!(&context.restore_token);
+    debug!(
+        "Portal restore token received: {}",
+        context.restore_token.is_some()
+    );
     if context.has_remote_desktop {
         debug!("Remote Desktop Session started");
     } else {

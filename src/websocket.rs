@@ -2,8 +2,9 @@ use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, WebSocket, WebSocketE
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{JoinHandle, spawn};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::channel;
@@ -17,6 +18,7 @@ use crate::protocol::{
 };
 
 use crate::cerror::CErrorCode;
+use crate::codec::CodecOrder;
 use crate::video::{EncoderOptions, VideoEncoder};
 
 struct VideoConfig {
@@ -25,6 +27,10 @@ struct VideoConfig {
     max_width: usize,
     max_height: usize,
     frame_rate: f64,
+    bitrate_kbps: u32,
+    codecs: CodecOrder,
+    /// generation of the remembered screen share the capturable came from, 0 if none
+    generation: u64,
 }
 
 enum VideoCommands {
@@ -32,6 +38,82 @@ enum VideoCommands {
     Pause,
     Resume,
     Restart,
+    RequestKeyframe,
+}
+
+/// A running recorder kept after its connection ended, so the next one can pick it up.
+struct ParkedRecorder {
+    source: String,
+    recorder: Box<dyn Recorder>,
+}
+
+/// The screen share (portal session) remembered until the server exits or the client refreshes.
+struct RememberedScreen {
+    // Declared first so the recorder is dropped before the capturables that keep the portal
+    // session alive.
+    recorder: Option<ParkedRecorder>,
+    capturables: Vec<Box<dyn Capturable>>,
+    capture_cursor: bool,
+    /// identifies the portal session, a recorder only fits capturables of the same one
+    generation: u64,
+}
+
+static REMEMBERED_SCREEN: Mutex<Option<RememberedScreen>> = Mutex::new(None);
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn remembered_screen() -> std::sync::MutexGuard<'static, Option<RememberedScreen>> {
+    REMEMBERED_SCREEN.lock().expect("lock poisoned")
+}
+
+/// The remembered capturables, if they were requested with the same cursor mode.
+fn remembered_capturables(capture_cursor: bool) -> Option<(Vec<Box<dyn Capturable>>, u64)> {
+    remembered_screen()
+        .as_ref()
+        .filter(|screen| screen.capture_cursor == capture_cursor)
+        .map(|screen| (screen.capturables.clone(), screen.generation))
+}
+
+/// Drops the remembered screen, its parked recorder first.
+fn forget_screen() {
+    // dropped after the lock is released, closing a pipeline can take a moment
+    let old = remembered_screen().take();
+    drop(old);
+}
+
+fn remember_screen(capturables: &[Box<dyn Capturable>], capture_cursor: bool) -> u64 {
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    *remembered_screen() = Some(RememberedScreen {
+        recorder: None,
+        capturables: capturables.to_vec(),
+        capture_cursor,
+        generation,
+    });
+    generation
+}
+
+fn take_parked_recorder(generation: u64, source: &str) -> Option<Box<dyn Recorder>> {
+    let mut guard = remembered_screen();
+    let screen = guard
+        .as_mut()
+        .filter(|screen| screen.generation == generation)?;
+    if screen.recorder.as_ref()?.source == source {
+        screen.recorder.take().map(|parked| parked.recorder)
+    } else {
+        None
+    }
+}
+
+/// Keeps a recorder for the next connection; drops it if its portal session is gone.
+fn park_recorder(generation: u64, source: String, recorder: Box<dyn Recorder>) {
+    let mut guard = remembered_screen();
+    if let Some(screen) = guard
+        .as_mut()
+        .filter(|screen| screen.generation == generation)
+    {
+        // a different parked recorder goes first: only one pipeline at a time
+        screen.recorder = None;
+        screen.recorder = Some(ParkedRecorder { source, recorder });
+    }
 }
 
 fn send_message<S>(sender: &mut S, message: MessageOutbound)
@@ -52,6 +134,8 @@ pub struct WeylusClientHandler<S, R, FnUInput> {
     on_uinput_inaccessible: FnUInput,
     config: WeylusClientConfig,
     capture_cursor: bool,
+    /// generation of the remembered screen share `capturables` came from, 0 if none
+    generation: u64,
     client_name: Option<String>,
     video_thread: JoinHandle<()>,
 }
@@ -60,6 +144,8 @@ pub struct WeylusClientHandler<S, R, FnUInput> {
 pub struct WeylusClientConfig {
     pub encoder_options: EncoderOptions,
     pub wayland_support: bool,
+    /// keep the screen share (and its running capture) across connections
+    pub remember_screen: bool,
     pub no_gui: bool,
 }
 
@@ -79,7 +165,14 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
             let sender = sender.clone();
             // offload creating the videostream to another thread to avoid blocking the thread that
             // is receiving messages from the websocket
-            spawn(move || handle_video(video_receiver, sender, config.encoder_options))
+            spawn(move || {
+                handle_video(
+                    video_receiver,
+                    sender,
+                    config.encoder_options,
+                    config.remember_screen,
+                )
+            })
         };
 
         Self {
@@ -91,6 +184,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
             on_uinput_inaccessible,
             config,
             capture_cursor: false,
+            generation: 0,
             client_name: None,
             video_thread,
         }
@@ -110,7 +204,8 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                         MessageInbound::PointerEvent(event) => self.process_pointer_event(&event),
                         MessageInbound::WheelEvent(event) => self.process_wheel_event(&event),
                         MessageInbound::KeyboardEvent(event) => self.process_keyboard_event(&event),
-                        MessageInbound::GetCapturableList => self.send_capturable_list(),
+                        MessageInbound::GetCapturableList => self.send_capturable_list(false),
+                        MessageInbound::RefreshCapturableList => self.send_capturable_list(true),
                         MessageInbound::Config(config) => self.update_config(config),
                         MessageInbound::PauseVideo => {
                             self.video_sender.send(VideoCommands::Pause).unwrap()
@@ -121,6 +216,12 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                         MessageInbound::RestartVideo => {
                             self.video_sender.send(VideoCommands::Restart).unwrap()
                         }
+                        MessageInbound::ClientLog(msg) => info!("Client: {msg}"),
+                        MessageInbound::SetCaptureCursor(c) => self.capture_cursor = c,
+                        MessageInbound::RequestKeyframe => self
+                            .video_sender
+                            .send(VideoCommands::RequestKeyframe)
+                            .unwrap(),
                         MessageInbound::ChooseCustomInputAreas => {
                             let (sender, receiver) = std::sync::mpsc::channel();
                             crate::gui::get_input_area(self.config.no_gui, sender);
@@ -181,15 +282,40 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
         }
     }
 
-    fn send_capturable_list(&mut self)
+    fn send_capturable_list(&mut self, refresh: bool)
     where
         S: WeylusSender,
     {
-        let mut windows = Vec::<String>::new();
-        self.capturables = get_capturables(self.config.wayland_support, self.capture_cursor);
-        self.capturables.iter().for_each(|c| {
-            windows.push(c.name());
-        });
+        let remember = self.config.remember_screen;
+        let cached = if remember && !refresh {
+            remembered_capturables(self.capture_cursor)
+        } else {
+            None
+        };
+        (self.capturables, self.generation) = match cached {
+            Some(cached) => {
+                info!("Reusing remembered screen share");
+                cached
+            }
+            None => {
+                if remember {
+                    forget_screen();
+                }
+                let capturables = get_capturables(self.config.wayland_support, self.capture_cursor);
+                // an empty list is a failed session, don't keep it
+                // every portal session gets its own generation: a refreshed session can reuse
+                // the stream's node id, so the name alone doesn't tell the sources apart
+                let generation = if capturables.is_empty() {
+                    0
+                } else if remember {
+                    remember_screen(&capturables, self.capture_cursor)
+                } else {
+                    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+                };
+                (capturables, generation)
+            }
+        };
+        let windows: Vec<String> = self.capturables.iter().map(|c| c.name()).collect();
         self.send_message(MessageOutbound::CapturableList(windows));
     }
 
@@ -238,10 +364,14 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
             self.video_sender
                 .send(VideoCommands::Start(VideoConfig {
                     capturable,
+                    generation: self.generation,
                     capture_cursor: config.capture_cursor,
                     max_width: config.max_width,
                     max_height: config.max_height,
                     frame_rate: config.frame_rate,
+                    // NaN stays NaN through clamp and becomes 0 in the cast
+                    bitrate_kbps: (config.bitrate_mbps.clamp(0.0, 200.0) * 1000.0).round() as u32,
+                    codecs: CodecOrder::from_names(&config.codecs),
                 }))
                 .unwrap();
         } else {
@@ -253,14 +383,25 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
     }
 }
 
+/// Video messages allowed between the encoder and the socket; more means the link is behind, so
+/// the tick is skipped before capture (dropping after encoding would break P-frame references).
+const MAX_VIDEO_BACKLOG: usize = 2;
+
+const RECORDER_RETRIES: u32 = 3;
+
 fn handle_video<S: WeylusSender + Clone + 'static>(
     receiver: mpsc::Receiver<VideoCommands>,
     mut sender: S,
-    encoder_options: EncoderOptions,
+    base_options: EncoderOptions,
+    remember_screen: bool,
 ) {
     const EFFECTIVE_INIFINITY: Duration = Duration::from_secs(3600 * 24 * 365 * 200);
 
     let mut recorder: Option<Box<dyn Recorder>> = None;
+    // name of the capturable the recorder was built for
+    let mut recorder_source: Option<String> = None;
+    // generation of the remembered screen share the recorder belongs to
+    let mut recorder_generation = 0;
     let mut video_encoder: Option<Box<VideoEncoder>> = None;
 
     let mut max_width = 1920;
@@ -268,6 +409,7 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
     let mut frame_duration = EFFECTIVE_INIFINITY;
     let mut last_frame = Instant::now();
     let mut paused = false;
+    let mut encoder_options = base_options;
 
     loop {
         let now = Instant::now();
@@ -283,31 +425,75 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
 
         match receiver.recv_timeout(if paused { EFFECTIVE_INIFINITY } else { timeout }) {
             Ok(VideoCommands::Start(config)) => {
-                #[allow(unused_assignments)]
+                let source = config.capturable.name();
+                if recorder.is_some()
+                    && recorder_source.as_ref() == Some(&source)
+                    && recorder_generation == config.generation
                 {
-                    // gstpipewire can not handle setting a pipeline's state to Null after another
-                    // pipeline has been created and its state has been set to Play.
-                    // This line makes sure that there always is only a single recorder and thus
-                    // single pipeline in this thread by forcing rust to call the destructor of the
-                    // current pipeline here, right before creating a new pipeline.
-                    // See: https://gitlab.freedesktop.org/pipewire/pipewire/-/issues/986
-                    //
-                    // This shouldn't affect other Recorder trait objects.
-                    recorder = None;
-                }
-                match config.capturable.recorder(config.capture_cursor) {
-                    Ok(r) => {
-                        recorder = Some(r);
-                        max_width = config.max_width;
-                        max_height = config.max_height;
-                        send_message(&mut sender, MessageOutbound::ConfigOk);
+                    // rebuilding a PipeWire recorder for the same stream yields no buffers, so
+                    // settings that don't change the source keep the running one. capture_cursor
+                    // isn't one of them: PipeWire fixes the cursor mode when the portal session
+                    // starts and no recorder reads it.
+                    max_width = config.max_width;
+                    max_height = config.max_height;
+                    send_message(&mut sender, MessageOutbound::ConfigOk);
+                } else {
+                    #[allow(unused_assignments)]
+                    {
+                        // gstpipewire can not handle setting a pipeline's state to Null after another
+                        // pipeline has been created and its state has been set to Play.
+                        // This line makes sure that there always is only a single recorder and thus
+                        // single pipeline in this thread by forcing rust to call the destructor of the
+                        // current pipeline here, right before creating a new pipeline.
+                        // See: https://gitlab.freedesktop.org/pipewire/pipewire/-/issues/986
+                        //
+                        // This shouldn't affect other Recorder trait objects.
+                        recorder = None;
+                        recorder_source = None;
                     }
-                    Err(err) => {
-                        warn!("Failed to init screen cast: {}!", err);
-                        send_message(
-                            &mut sender,
-                            MessageOutbound::Error("Failed to init screen cast!".into()),
-                        )
+                    let parked = if remember_screen && config.generation != 0 {
+                        take_parked_recorder(config.generation, &source)
+                    } else {
+                        None
+                    };
+                    let new_recorder = match parked {
+                        Some(r) => {
+                            info!("Reusing running screen capture: {source}");
+                            Ok(r)
+                        }
+                        None => {
+                            // right after the previous pipeline was torn down gstpipewire can fail
+                            // with "Element failed to change its state"; it recovers within a moment
+                            let mut res = config.capturable.recorder(config.capture_cursor);
+                            for attempt in 1..=RECORDER_RETRIES {
+                                let Err(err) = &res else { break };
+                                warn!(
+                                    "Screen capture failed to start ({err}), retry {attempt}/{RECORDER_RETRIES}."
+                                );
+                                std::thread::sleep(Duration::from_millis(300));
+                                res = config.capturable.recorder(config.capture_cursor);
+                            }
+                            res.inspect(|_| {
+                                info!("Screen capture started: {source}");
+                            })
+                        }
+                    };
+                    match new_recorder {
+                        Ok(r) => {
+                            recorder = Some(r);
+                            recorder_source = Some(source);
+                            recorder_generation = config.generation;
+                            max_width = config.max_width;
+                            max_height = config.max_height;
+                            send_message(&mut sender, MessageOutbound::ConfigOk);
+                        }
+                        Err(err) => {
+                            warn!("Failed to init screen cast: {}!", err);
+                            send_message(
+                                &mut sender,
+                                MessageOutbound::Error("Failed to init screen cast!".into()),
+                            )
+                        }
                     }
                 }
                 last_frame = Instant::now();
@@ -322,6 +508,22 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                     EFFECTIVE_INIFINITY
                 };
                 frame_duration = frame_duration.min(EFFECTIVE_INIFINITY);
+
+                let options = EncoderOptions {
+                    codecs: config.codecs,
+                    bitrate_kbps: config.bitrate_kbps,
+                    frame_rate: if config.bitrate_kbps > 0 {
+                        config.frame_rate.round().clamp(1.0, 240.0) as u32
+                    } else {
+                        0
+                    },
+                    ..base_options
+                };
+                if options != encoder_options {
+                    encoder_options = options;
+                    // rate control is fixed at open time
+                    video_encoder = None;
+                }
             }
             Ok(VideoCommands::Pause) => {
                 paused = true;
@@ -332,7 +534,16 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
             Ok(VideoCommands::Restart) => {
                 video_encoder = None;
             }
+            Ok(VideoCommands::RequestKeyframe) => {
+                if let Some(encoder) = video_encoder.as_mut() {
+                    encoder.request_keyframe();
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {
+                if sender.video_backlog() >= MAX_VIDEO_BACKLOG {
+                    trace!("Video backlog, skipping frame.");
+                    continue;
+                }
                 if recorder.is_none() {
                     warn!("Screen capture not initalized, can not send video frame!");
                     continue;
@@ -388,7 +599,15 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                 video_encoder.encode(pixel_data);
             }
             // stop thread once the channel is closed
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => {
+                if remember_screen
+                    && recorder_generation != 0
+                    && let (Some(recorder), Some(source)) = (recorder, recorder_source)
+                {
+                    park_recorder(recorder_generation, source, recorder);
+                }
+                return;
+            }
         };
     }
 }
@@ -420,6 +639,7 @@ unsafe impl Send for WsMessage {}
 #[derive(Clone)]
 pub struct WsWeylusSender {
     sender: tokio::sync::mpsc::Sender<WsMessage>,
+    video_backlog: Arc<AtomicUsize>,
 }
 
 impl WeylusSender for WsWeylusSender {
@@ -431,7 +651,16 @@ impl WeylusSender for WsWeylusSender {
     }
 
     fn send_video(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
-        self.sender.blocking_send(WsMessage::Video(bytes.to_vec()))
+        self.video_backlog.fetch_add(1, Ordering::Relaxed);
+        let res = self.sender.blocking_send(WsMessage::Video(bytes.to_vec()));
+        if res.is_err() {
+            self.video_backlog.fetch_sub(1, Ordering::Relaxed);
+        }
+        res
+    }
+
+    fn video_backlog(&self) -> usize {
+        self.video_backlog.load(Ordering::Relaxed)
     }
 }
 
@@ -445,6 +674,7 @@ pub fn weylus_websocket_channel(
 
     let (sender_inbound, receiver_inbound) = channel::<MessageInbound>(32);
     let (sender_outbound, mut receiver_outbound) = channel::<WsMessage>(32);
+    let video_backlog = Arc::new(AtomicUsize::new(0));
 
     {
         let sender_outbound = sender_outbound.clone();
@@ -487,6 +717,7 @@ pub fn weylus_websocket_channel(
         });
     }
 
+    let backlog = video_backlog.clone();
     tokio::spawn(async move {
         loop {
             let msg = if let Some(msg) = receiver_outbound.recv().await {
@@ -505,7 +736,9 @@ pub fn weylus_websocket_channel(
                     }
                 }
                 WsMessage::Video(data) => {
-                    if let Err(err) = tx.write_frame(Frame::binary(data.into())).await {
+                    let res = tx.write_frame(Frame::binary(data.into())).await;
+                    backlog.fetch_sub(1, Ordering::Relaxed);
+                    if let Err(err) = res {
                         if let WebSocketError::ConnectionClosed = err {
                             break;
                         }
@@ -529,6 +762,7 @@ pub fn weylus_websocket_channel(
     (
         WsWeylusSender {
             sender: sender_outbound,
+            video_backlog,
         },
         WsWeylusReceiver {
             recv: receiver_inbound,
