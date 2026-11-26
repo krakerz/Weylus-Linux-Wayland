@@ -1,7 +1,3 @@
-interface Window {
-    ManagedMediaSource: any;
-}
-
 enum LogLevel {
     ERROR = 0,
     WARN,
@@ -13,6 +9,8 @@ enum LogLevel {
 let log_pre: HTMLPreElement;
 let log_level: LogLevel = LogLevel.ERROR;
 let no_log_messages: boolean = true;
+// warnings and errors are mirrored to the server log: iPad Safari has no console without a Mac
+let log_socket: WebSocket | null = null;
 
 let fps_out: HTMLOutputElement;
 let frame_count = 0;
@@ -34,10 +32,7 @@ function run(level: string) {
             } else if ((e as Event | UIEvent).target) {
                 let ev = e as Event;
                 let src = (e.target as any).src;
-                if (ev.target instanceof HTMLVideoElement)
-                    log(LogLevel.ERROR, "Failed to decode video, try reducing resolution or disabling hardware acceleration and reload the page. Error src: " + src);
-                else
-                    log(LogLevel.ERROR, "Failed to obtain resource, target: " + ev.target + " type: " + ev.type + " src: " + src + " Error object: " + JSON.stringify(ev));
+                log(LogLevel.ERROR, "Failed to obtain resource, target: " + ev.target + " type: " + ev.type + " src: " + src + " Error object: " + JSON.stringify(ev));
             } else {
                 log(LogLevel.WARN, "Got unknown event: " + JSON.stringify(e));
             }
@@ -48,6 +43,8 @@ function run(level: string) {
 }
 
 function log(level: LogLevel, msg: string) {
+    if (level <= LogLevel.WARN && log_socket && log_socket.readyState == WebSocket.OPEN)
+        log_socket.send(JSON.stringify({ "ClientLog": LogLevel[level] + ": " + msg }));
     if (level > log_level)
         return;
 
@@ -107,6 +104,14 @@ class CustomInputAreas {
     pen: Rect;
 }
 
+function bitrate_label(v: number) {
+    return v > 0 ? v.toFixed(1) + " Mbps" : "Auto";
+}
+
+// codec ids as used in the second header byte of video messages
+const CODEC_IDS = ["h264", "hevc", "av1"];
+const CODEC_LABELS: { [k: string]: string } = { "h264": "H.264", "hevc": "H.265", "av1": "AV1" };
+
 class Settings {
     webSocket: WebSocket;
     checks: Map<string, HTMLInputElement>;
@@ -116,7 +121,20 @@ class Settings {
     scale_video_input: HTMLInputElement;
     scale_video_output: HTMLOutputElement;
     range_min_pressure: HTMLInputElement;
-    check_aggressive_seek: HTMLInputElement;
+    pen_pressure_mode: HTMLSelectElement;
+    reselect_capture = false;
+    bitrate_input: HTMLInputElement;
+    bitrate_output: HTMLOutputElement;
+    codec_select: HTMLSelectElement;
+    codec_output: HTMLOutputElement;
+    decodable: Set<string> = new Set(["h264"]);
+    codecs_probed: Promise<void>;
+    last_codec_label: string | null = null;
+    // codecs that were given up on this session (never fall back twice for the same one)
+    codec_fell_back: Set<string> = new Set();
+    codec_fallback_note: string | null = null;
+    // the codec the user picked before a fallback to Auto: that is what stays in localStorage
+    codec_saved_choice: string | null = null;
     client_name_input: HTMLInputElement;
     visible: boolean;
     custom_input_areas: CustomInputAreas;
@@ -133,7 +151,13 @@ class Settings {
         this.scale_video_input = document.getElementById("scale_video") as HTMLInputElement;
         this.scale_video_output = this.scale_video_input.nextElementSibling as HTMLOutputElement;
         this.range_min_pressure = document.getElementById("min_pressure") as HTMLInputElement;
+        this.pen_pressure_mode = document.getElementById("pen_pressure_mode") as HTMLSelectElement;
+        this.bitrate_input = document.getElementById("bitrate") as HTMLInputElement;
+        this.bitrate_output = this.bitrate_input.nextElementSibling as HTMLOutputElement;
+        this.codec_select = document.getElementById("codec") as HTMLSelectElement;
+        this.codec_output = document.getElementById("active_codec") as HTMLOutputElement;
         this.client_name_input = document.getElementById("client_name") as HTMLInputElement;
+        this.codecs_probed = this.probe_codecs();
         this.frame_rate_input.oninput = () => {
             this.frame_rate_output.value = Math.round(frame_rate_scale(this.frame_rate_input.valueAsNumber)).toString();
         }
@@ -141,6 +165,10 @@ class Settings {
             let [w, h] = calc_max_video_resolution(this.scale_video_input.valueAsNumber)
             this.scale_video_output.value = w + "x" + h
         }
+        this.bitrate_input.oninput = () => {
+            this.bitrate_output.value = bitrate_label(this.bitrate_input.valueAsNumber);
+        }
+        this.range_min_pressure.oninput = () => this.update_pressure_output();
         this.visible = true;
 
         // Settings UI
@@ -186,11 +214,6 @@ class Settings {
             this.save_settings();
         };
 
-        this.check_aggressive_seek = this.checks.get("aggressive_seeking");
-        this.check_aggressive_seek.onchange = () => {
-            this.save_settings();
-        };
-
         this.checks.get("enable_video").onchange = (e) => {
             let enabled = (e.target as HTMLInputElement).checked;
             document.getElementById("video").classList.toggle("vanish", !enabled);
@@ -222,20 +245,50 @@ class Settings {
 
         this.frame_rate_input.onchange = () => this.save_settings();
         this.range_min_pressure.onchange = () => this.save_settings();
+        this.pen_pressure_mode.onchange = () => {
+            // a fixed pressure of 0 would draw nothing
+            if (this.pen_pressure_mode.value == "fixed" && this.range_min_pressure.valueAsNumber == 0) {
+                this.range_min_pressure.value = "1";
+                this.update_pressure_output();
+            }
+            this.save_settings();
+        };
 
         // server
         let upd_server_config = () => { this.save_settings(); this.send_server_config() };
         this.checks.get("uinput_support").onchange = upd_server_config;
-        this.checks.get("capture_cursor").onchange = upd_server_config;
+        this.checks.get("capture_cursor").onchange = () => {
+            this.save_settings();
+            // the portal decides the cursor mode per session: start a new one (the screen picker shows again)
+            this.webSocket.send(JSON.stringify({ "SetCaptureCursor": this.checks.get("capture_cursor").checked }));
+            this.reselect_capture = true;
+            this.webSocket.send('"RefreshCapturableList"');
+        };
         this.scale_video_input.onchange = upd_server_config;
+        this.bitrate_input.onchange = upd_server_config;
+        this.codec_select.onchange = () => {
+            // an explicit change by the user replaces the session fallback
+            this.codec_saved_choice = null;
+            this.codec_fallback_note = null;
+            upd_server_config();
+        };
         this.client_name_input.onchange = upd_server_config;
         this.frame_rate_input.onchange = upd_server_config;
 
-        document.getElementById("refresh").onclick = () => this.webSocket.send('"GetCapturableList"');
+        document.getElementById("refresh").onclick = () => {
+            // the new portal session renames its stream: reselect it so the video resumes
+            this.reselect_capture = true;
+            this.webSocket.send('"RefreshCapturableList"');
+        };
         document.getElementById("custom_input_areas").onclick = () => {
             this.webSocket.send('"ChooseCustomInputAreas"');
         };
         this.capturable_select.onchange = () => this.send_server_config();
+    }
+
+    update_pressure_output() {
+        (this.range_min_pressure.nextElementSibling as HTMLOutputElement).value =
+            this.range_min_pressure.valueAsNumber.toFixed(2);
     }
 
     send_server_config() {
@@ -249,9 +302,80 @@ class Settings {
         config["max_width"] = w;
         config["max_height"] = h;
         config["frame_rate"] = frame_rate_scale(this.frame_rate_input.valueAsNumber);
+        config["bitrate_mbps"] = this.bitrate_input.valueAsNumber;
+        config["codecs"] = this.codec_list();
         if (this.client_name_input.value)
             config["client_name"] = this.client_name_input.value;
         this.webSocket.send(JSON.stringify({ "Config": config }));
+    }
+
+    probe_codecs(): Promise<void> {
+        if (typeof VideoDecoder == "undefined")
+            return Promise.resolve();
+        const candidates: [string, string][] = [
+            ["h264", "avc1.640033"],
+            ["hevc", "hvc1.1.6.L153.B0"],
+            ["av1", "av01.0.13M.08"],
+        ];
+        return Promise.all(candidates.map(([name, codec]) =>
+            VideoDecoder.isConfigSupported({
+                codec: codec,
+                codedWidth: 1920,
+                codedHeight: 1080,
+                optimizeForLatency: true,
+                hardwareAcceleration: "prefer-hardware",
+            }).then((s) => s.supported ? name : null).catch(() => null)
+        )).then((names) => {
+            for (const n of names)
+                if (n)
+                    this.decodable.add(n);
+        });
+    }
+
+    // codecs to request, best first
+    codec_list(): string[] {
+        let v = this.codec_select.value;
+        if (v == "auto")
+            return ["av1", "hevc", "h264"].filter(c => c == "h264" || this.decodable.has(c));
+        // an explicit choice is not filtered, so it can override a wrong probe
+        if (!this.decodable.has(v))
+            log(LogLevel.WARN, "Selected codec " + v + " was not reported as decodable by this browser");
+        return v == "h264" ? ["h264"] : [v, "h264"];
+    }
+
+    show_active_codec(id: number) {
+        const names = CODEC_LABELS;
+        let label = names[CODEC_IDS[id]] ?? "?";
+        if (this.codec_fallback_note && this.codec_select.value == "auto")
+            this.codec_output.value = "Auto: " + label + " (" + this.codec_fallback_note + ")";
+        else
+            this.codec_output.value = label;
+        if (label == this.last_codec_label)
+            return;
+        this.last_codec_label = label;
+        log(LogLevel.INFO, "Active video codec: " + label);
+        let wanted = names[this.codec_list()[0]];
+        if (label != wanted)
+            log(LogLevel.WARN, "Server uses " + label + " instead of " + wanted);
+    }
+
+    // The user explicitly chose `name` (not h264/auto) and it can't be decoded here: switch to Auto and
+    // save it, so later connects don't retry the codec. Returns whether it switched.
+    try_codec_fallback(name: string, reason: string): boolean {
+        const v = this.codec_select.value;
+        if (v == "auto" || v == "h264" || v != name || this.codec_fell_back.has(name))
+            return false;
+        this.codec_fell_back.add(name);
+        const label = CODEC_LABELS[name] ?? name;
+        this.codec_saved_choice = null;
+        this.codec_select.value = "auto";
+        this.save_settings();
+        this.codec_fallback_note = label + " unsupported";
+        this.codec_output.value = "Auto (" + this.codec_fallback_note + ")";
+        log(LogLevel.WARN, "Codec fallback reason: " + reason);
+        log(LogLevel.WARN, "Codec " + label + " can't be decoded on this device, switched to Auto");
+        this.send_server_config();
+        return true;
     }
 
     save_settings() {
@@ -261,6 +385,9 @@ class Settings {
         settings["frame_rate"] = frame_rate_scale(this.frame_rate_input.valueAsNumber).toString();
         settings["scale_video"] = this.scale_video_input.value;
         settings["min_pressure"] = this.range_min_pressure.value;
+        settings["pen_pressure_mode"] = this.pen_pressure_mode.value;
+        settings["bitrate"] = this.bitrate_input.value;
+        settings["codec"] = this.codec_saved_choice ?? this.codec_select.value;
         settings["custom_input_areas"] = this.custom_input_areas;
         settings["client_name"] = this.client_name_input.value;
         localStorage.setItem("settings", JSON.stringify(settings));
@@ -273,6 +400,8 @@ class Settings {
             this.frame_rate_output.value = (30).toString();
             let [w, h] = calc_max_video_resolution(this.scale_video_input.valueAsNumber)
             this.scale_video_output.value = w + "x" + h;
+            this.bitrate_output.value = bitrate_label(this.bitrate_input.valueAsNumber);
+            this.update_pressure_output();
             return;
         }
         try {
@@ -297,6 +426,20 @@ class Settings {
             let min_pressure = settings["min_pressure"];
             if (min_pressure)
                 this.range_min_pressure.value = min_pressure;
+            this.update_pressure_output();
+
+            let pen_pressure_mode = settings["pen_pressure_mode"];
+            if (pen_pressure_mode === "device" || pen_pressure_mode === "fixed")
+                this.pen_pressure_mode.value = pen_pressure_mode;
+
+            let bitrate = settings["bitrate"];
+            if (bitrate)
+                this.bitrate_input.value = bitrate;
+            this.bitrate_output.value = bitrate_label(this.bitrate_input.valueAsNumber);
+
+            let codec = settings["codec"];
+            if (codec === "auto" || codec === "h264" || codec === "hevc" || codec === "av1")
+                this.codec_select.value = codec;
 
             this.custom_input_areas = settings["custom_input_areas"];
 
@@ -374,6 +517,14 @@ class Settings {
         else if (current_selection)
             // Can't find the window, so don't select anything
             this.capturable_select.value = "";
+        if (this.reselect_capture) {
+            this.reselect_capture = false;
+            // a new portal session renames its stream: take the first one so the video comes back
+            if (!this.capturable_select.value && window_names.length > 0)
+                this.capturable_select.value = "0";
+            if (this.capturable_select.value)
+                this.send_server_config();
+        }
     }
 
     toggle_energysaving(energysaving: boolean) {
@@ -462,7 +613,12 @@ class PEvent {
         this.y = (event.clientY - targetRect.top) / targetRect.height * y_scale + y_offset;
         // this.movement_x = event.movementX ? event.movementX : 0;
         // this.movement_y = event.movementY ? event.movementY : 0;
-        this.pressure = Math.max(event.pressure, settings.range_min_pressure.valueAsNumber);
+        let pressure_setting = settings.range_min_pressure.valueAsNumber;
+        // pencils without a force sensor report a constant; "fixed" replaces it while touching
+        if (event.pointerType == "pen" && settings.pen_pressure_mode.value == "fixed")
+            this.pressure = (event.buttons & 1) || event.pressure > 0 ? pressure_setting : 0;
+        else
+            this.pressure = Math.max(event.pressure, pressure_setting);
         this.tilt_x = event.tiltX;
         this.tilt_y = event.tiltY;
         this.width = event.width / diag_len;
@@ -905,59 +1061,210 @@ function frame_rate_stats() {
 
 function handle_messages(
     webSocket: WebSocket,
-    video: HTMLVideoElement,
+    video: HTMLCanvasElement,
     onConfigOk: Function,
     onConfigError: Function,
     onCapturableList: Function,
 ) {
-    let mediaSource: MediaSource = null;
-    let sourceBuffer: SourceBuffer = null;
-    let queue = [];
-    const MAX_BUFFER_LENGTH = 20;  // In seconds
-    function upd_buf() {
-        if (sourceBuffer == null)
-            return;
-        if (!sourceBuffer.updating && queue.length > 0 && mediaSource.readyState == "open") {
-            let buffer_length = 0;
-            if (sourceBuffer.buffered.length) {
-                // Assume only one time range...
-                buffer_length = sourceBuffer.buffered.end(0) - sourceBuffer.buffered.start(0);
-            }
-            if (buffer_length > MAX_BUFFER_LENGTH) {
-                sourceBuffer.remove(0, sourceBuffer.buffered.end(0) - MAX_BUFFER_LENGTH / 2);
-                // This will trigger updateend when finished
-            } else {
-                try {
-                    sourceBuffer.appendBuffer(queue.shift());
-                } catch (err) {
-                    log(LogLevel.DEBUG, "Error appending to sourceBuffer:" + err);
-                    // Drop everything, and try to pick up the stream again
-                    if (sourceBuffer.updating)
-                        sourceBuffer.abort();
-                    sourceBuffer.remove(0, Infinity);
-                }
-            }
+    const ctx2d = video.getContext("2d", { alpha: false, desynchronized: true });
+    let decoder: VideoDecoder | null = null;
+    let config: VideoDecoderConfig | null = null;
+    let need_key = true;
+    let pending: VideoFrame | null = null;
+    let raf_scheduled = false;
+    let last_key_request = 0;
+    let version_error_logged = false;
+    // codec fallback bookkeeping (see Settings.try_codec_fallback)
+    let active_codec = "";
+    let fail_times: number[] = [];
+    let config_time = 0;
+    let got_frame = false;
+
+    // an explicit non-h264 codec that failed twice within 5 s is dropped in favour of Auto
+    function codec_failure(reason: string) {
+        let t = performance.now();
+        fail_times = fail_times.filter((x) => t - x < 5000);
+        fail_times.push(t);
+        if (fail_times.length >= 2 && settings.try_codec_fallback(active_codec, reason))
+            fail_times = [];
+    }
+
+    // decoder.configure may throw synchronously (e.g. NotSupportedError)
+    function configure(d: VideoDecoder, c: VideoDecoderConfig): boolean {
+        try {
+            d.configure(c);
+            return true;
+        } catch (e) {
+            log(LogLevel.WARN, "Failed to configure video decoder: " + e);
+            codec_failure("configure threw: " + e);
+            return false;
         }
     }
+
+    // rate limited so a congested link isn't flooded with requests
+    function request_keyframe() {
+        let t = performance.now();
+        if (t - last_key_request > 300) {
+            last_key_request = t;
+            webSocket.send('"RequestKeyframe"');
+        }
+    }
+
+    function draw() {
+        raf_scheduled = false;
+        let frame = pending;
+        pending = null;
+        if (!frame)
+            return;
+        if (video.width != frame.displayWidth || video.height != frame.displayHeight) {
+            video.width = frame.displayWidth;
+            video.height = frame.displayHeight;
+            stretch_video();
+        }
+        ctx2d.drawImage(frame, 0, 0);
+        frame.close();
+    }
+
+    function on_frame(frame: VideoFrame) {
+        got_frame = true;
+        // render-side drop: only the newest frame per display refresh is drawn
+        pending?.close();
+        pending = frame;
+        if (!raf_scheduled) {
+            raf_scheduled = true;
+            requestAnimationFrame(draw);
+        }
+    }
+
+    function new_decoder() {
+        if (decoder && decoder.state != "closed") {
+            try {
+                decoder.close();
+            } catch (e) { }
+        }
+        let d: VideoDecoder = new VideoDecoder({
+            output: on_frame,
+            error: (e) => {
+                // a closed or replaced decoder may still report (e.g. AbortError): it must not null the current one
+                if (decoder !== d)
+                    return;
+                log(LogLevel.WARN, "Video decoder error: " + e.name + ": " + e.message);
+                codec_failure("decoder error " + e.name);
+                need_key = true;
+                decoder = null;
+                request_keyframe();
+            },
+        });
+        decoder = d;
+        if (config)
+            configure(d, config);
+    }
+
+    function handle_video_message(buf: ArrayBuffer) {
+        let view = new DataView(buf);
+        if (view.getUint8(0) != 2) {
+            if (!version_error_logged) {
+                version_error_logged = true;
+                log(LogLevel.ERROR, "Video format version mismatch between server and client, reload the page.");
+            }
+            return;
+        }
+        let flags = view.getUint8(1);
+        let codec_id = view.getUint8(2);
+        let pts_ms = view.getUint32(4, true);
+        settings.show_active_codec(codec_id);
+        let codec_name = CODEC_IDS[codec_id] ?? "";
+        if (codec_name != active_codec) {
+            active_codec = codec_name;
+            fail_times = [];
+        }
+        // chunks keep arriving but nothing was ever decoded for the current config
+        if (!(flags & 2) && config_time > 0 && !got_frame && performance.now() - config_time > 3000) {
+            config_time = 0;
+            settings.try_codec_fallback(active_codec, "no frame decoded 3 s after the codec config");
+        }
+        let off = 8;
+        if (flags & 2) {
+            let s = view.getUint8(8);
+            let codec = String.fromCharCode(...new Uint8Array(buf, 9, s));
+            let n = view.getUint32(9 + s, true);
+            off = 13 + s + n;
+            let first = config == null;
+            let new_config: VideoDecoderConfig = {
+                codec: codec,
+                optimizeForLatency: true,
+                hardwareAcceleration: "prefer-hardware",
+            };
+            if (n > 0)
+                new_config.description = new Uint8Array(buf, 13 + s, n).slice();
+            config = new_config;
+            log(LogLevel.INFO, "Video codec: " + codec);
+            if (first) {
+                let c = config;
+                VideoDecoder.isConfigSupported(c).then((r) => {
+                    if (!r.supported)
+                        log(LogLevel.ERROR, codec + " not supported by this browser's VideoDecoder");
+                }).catch(() => { });
+            }
+            // the received codec string itself may be unsupported: counts as one failure
+            let received_codec = active_codec;
+            VideoDecoder.isConfigSupported(config).then((r) => {
+                if (!r.supported && received_codec == active_codec)
+                    codec_failure("isConfigSupported false for " + codec);
+            }).catch(() => { });
+            got_frame = false;
+            config_time = performance.now();
+            if (!decoder || decoder.state == "closed")
+                new_decoder();
+            else
+                configure(decoder, config);
+            need_key = true;
+        }
+        let key = (flags & 1) != 0;
+        // after a decoder error the config is only resent when SPS/PPS change: rebuild from the cached one
+        if (key && config && (!decoder || decoder.state == "closed"))
+            new_decoder();
+        if (!decoder || !config || decoder.state != "configured") {
+            if (!key)
+                request_keyframe();
+            return;
+        }
+        if (!key && (need_key || decoder.decodeQueueSize > 1)) {
+            // a delta frame can't be dropped alone (later frames reference it): skip until the next keyframe
+            need_key = true;
+            request_keyframe();
+            return;
+        }
+        if (key && decoder.decodeQueueSize > 1) {
+            // the decoder is behind: a keyframe lets us flush the whole queue and resync
+            decoder.reset();
+            configure(decoder, config);
+        }
+        try {
+            decoder.decode(new EncodedVideoChunk({
+                type: key ? "key" : "delta",
+                timestamp: pts_ms * 1000,
+                data: new Uint8Array(buf, off),
+            }));
+        } catch (e) {
+            log(LogLevel.WARN, "Failed to decode video frame: " + e);
+            need_key = true;
+            request_keyframe();
+            return;
+        }
+        if (key)
+            need_key = false;
+    }
+
     webSocket.onmessage = (event: MessageEvent) => {
         if (typeof event.data == "string") {
             let msg = JSON.parse(event.data);
             if (typeof msg == "string") {
                 if (msg == "NewVideo") {
-                    let MS = window.ManagedMediaSource ? window.ManagedMediaSource : window.MediaSource;
-                    mediaSource = new MS();
-                    sourceBuffer = null;
-                    video.src = URL.createObjectURL(mediaSource);
-                    mediaSource.addEventListener("sourceopen", (_) => {
-                        let mimeType = 'video/mp4; codecs="avc1.4D403D"';
-                        if (!MS.isTypeSupported(mimeType))
-                            mimeType = "video/mp4";
-                        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                        sourceBuffer.addEventListener("updateend", upd_buf);
-                        // try to recover from errors by restarting the video
-                        if (sourceBuffer.onerror)
-                            sourceBuffer.onerror = () => settings.send_server_config();
-                    })
+                    need_key = true;
+                    config = null;
+                    config_time = 0;
+                    new_decoder();
                 } else if (msg == "ConfigOk") {
                     onConfigOk();
                 }
@@ -979,31 +1286,16 @@ function handle_messages(
         }
 
         // not a string -> got a video frame
-        queue.push(event.data);
-        upd_buf();
         frame_count += 1;
-
-        // only seek if there is data available, some browsers choke otherwise
-        if (video.seekable.length > 0) {
-            let seek_time = video.seekable.end(video.seekable.length - 1);
-            if (video.readyState >= (settings.check_aggressive_seek.checked ? 3 : 4)
-                // but make sure to catch up if the video is more than 3 seconds behind
-                || seek_time - video.currentTime > 3) {
-                if (isFinite(seek_time))
-                    video.currentTime = seek_time;
-                else
-                    log(LogLevel.WARN, "Failed to seek to end of video.")
-            }
-
-        }
+        handle_video_message(event.data);
     }
 }
 
 function check_apis() {
     let apis = [
         {
-            attrs: ["MediaSource", "ManagedMediaSource"],
-            msg: "This browser doesn't support MSE/MMS required to playback video stream, try upgrading!"
+            attrs: ["VideoDecoder"],
+            msg: "This browser doesn't support WebCodecs (VideoDecoder) required to play the video stream, try upgrading (iPadOS 16.4+)!"
         },
         {
             attrs: ["PointerEvent"],
@@ -1031,11 +1323,12 @@ function init() {
         window.location.port + "/ws" + window.location.search
     );
     webSocket.binaryType = "arraybuffer";
+    log_socket = webSocket;
 
     debug_overlay = document.getElementById("debug_overlay");
     settings = new Settings(webSocket);
 
-    let video = document.getElementById("video") as HTMLVideoElement;
+    let video = document.getElementById("video") as HTMLCanvasElement;
     let canvas = document.getElementById("canvas") as HTMLCanvasElement;
 
     video.oncontextmenu = function(event) {
@@ -1048,6 +1341,8 @@ function init() {
         event.stopPropagation();
         return false;
     };
+
+    init_view_controls(video);
 
     let toggle_fullscreen_btn = document.getElementById("fullscreen") as HTMLButtonElement;
 
@@ -1082,9 +1377,6 @@ function init() {
         settings.scale_video_output.value = w + "x" + h;
         settings.send_server_config();
     }
-    video.controls = false;
-    video.disableRemotePlayback = true;
-    video.onloadeddata = () => stretch_video();
     let is_connected = false;
     handle_messages(webSocket, video, () => {
         if (!is_connected) {
@@ -1098,11 +1390,15 @@ function init() {
     );
     window.onunload = () => { webSocket.close(); }
     webSocket.onopen = function(event) {
+        webSocket.send(JSON.stringify({ "SetCaptureCursor": settings.checks.get("capture_cursor").checked }));
         webSocket.send('"GetCapturableList"');
         if (!settings.video_enabled())
             webSocket.send('"PauseVideo"');
 
-        settings.send_server_config();
+        settings.codecs_probed.then(() => {
+            log(LogLevel.INFO, "Decodable video codecs: " + [...settings.decodable].join(", "));
+            settings.send_server_config();
+        });
 
         document.onvisibilitychange = () => {
             if (document.hidden) {
@@ -1115,14 +1411,147 @@ function init() {
     frame_rate_stats();
 }
 
+// View zoom/pan of the video. The transform is applied to #video itself, so getBoundingClientRect()
+// (used for the pointer coordinates in PointerHandler.onEvent) already includes it.
+const VIEW_ZOOM_MAX = 8;
+const VIEW_ZOOM_STEP = 1.25;
+let view_zoom = 1;
+let view_tx = 0;
+let view_ty = 0;
+// fit/stretch scale of the unzoomed view
+let view_base_sx = 1;
+let view_base_sy = 1;
+
 // object-fit: fill; <-- this is unfortunately not supported on iOS, so we use the following
 // workaround
 function stretch_video() {
-    let video = document.getElementById("video") as HTMLVideoElement;
+    let video = document.getElementById("video") as HTMLCanvasElement;
+    if (!video.clientWidth || !video.clientHeight)
+        return;
     if (settings.stretched_video()) {
-        video.style.transform = "scaleX(" + document.body.clientWidth / video.clientWidth + ") scaleY(" + document.body.clientHeight / video.clientHeight + ")";
+        view_base_sx = document.body.clientWidth / video.clientWidth;
+        view_base_sy = document.body.clientHeight / video.clientHeight;
     } else {
-        let scale = Math.min(document.body.clientWidth / video.clientWidth, document.body.clientHeight / video.clientHeight);
-        video.style.transform = "scale(" + scale + ")";
+        view_base_sx = view_base_sy = Math.min(document.body.clientWidth / video.clientWidth, document.body.clientHeight / video.clientHeight);
     }
+    apply_view_transform();
+}
+
+// pan range along one axis so the picture covers the viewport where it can, else it is centered;
+// c is the (untransformed) layout centre of the video
+function clamp_pan(t: number, size: number, viewport: number, c: number) {
+    if (size <= viewport)
+        return viewport / 2 - c;
+    return Math.min(Math.max(t, viewport - c - size / 2), size / 2 - c);
+}
+
+// the only place that writes the transform of #video
+function apply_view_transform() {
+    let video = document.getElementById("video") as HTMLCanvasElement;
+    if (view_zoom <= 1) {
+        view_zoom = 1;
+        view_tx = view_ty = 0;
+    } else {
+        let cx = video.offsetLeft + video.clientWidth / 2;
+        let cy = video.offsetTop + video.clientHeight / 2;
+        view_tx = clamp_pan(view_tx, video.clientWidth * view_base_sx * view_zoom, document.body.clientWidth, cx);
+        view_ty = clamp_pan(view_ty, video.clientHeight * view_base_sy * view_zoom, document.body.clientHeight, cy);
+    }
+    video.style.transform = "translate(" + view_tx + "px, " + view_ty + "px) scale(" +
+        view_base_sx * view_zoom + ", " + view_base_sy * view_zoom + ")";
+    let out = document.getElementById("zoom_level") as HTMLOutputElement | null;
+    if (out)
+        out.value = Math.round(view_zoom * 100) + "%";
+}
+
+// Scale the view by r while the content point under (ox, oy) moves to (nx, ny) (client coordinates).
+// r = 1 is a pure pan, ox == nx && oy == ny a pure zoom.
+function zoom_view(r: number, ox: number, oy: number, nx: number, ny: number) {
+    let video = document.getElementById("video") as HTMLCanvasElement;
+    let cx = video.offsetLeft + video.clientWidth / 2;
+    let cy = video.offsetTop + video.clientHeight / 2;
+    let z = Math.min(Math.max(view_zoom * r, 1), VIEW_ZOOM_MAX);
+    r = z / view_zoom;
+    view_tx = (nx - cx) - r * ((ox - cx) - view_tx);
+    view_ty = (ny - cy) - r * ((oy - cy) - view_ty);
+    view_zoom = z;
+    apply_view_transform();
+}
+
+function reset_view() {
+    view_zoom = 1;
+    apply_view_transform();
+}
+
+function init_view_controls(video: HTMLElement) {
+    let controls = document.getElementById("zoom_controls");
+    if (controls) {
+        // the controls never reach the PC
+        for (let ev of ["click", "pointerdown", "pointerup", "pointermove", "pointercancel"])
+            controls.addEventListener(ev, (e) => e.stopPropagation());
+        let centre = () => [document.body.clientWidth / 2, document.body.clientHeight / 2];
+        let step = (r: number) => {
+            let [x, y] = centre();
+            zoom_view(r, x, y, x, y);
+        };
+        document.getElementById("zoom_in").onclick = () => step(VIEW_ZOOM_STEP);
+        document.getElementById("zoom_out").onclick = () => step(1 / VIEW_ZOOM_STEP);
+        document.getElementById("zoom_reset").onclick = () => reset_view();
+    }
+    apply_view_transform();
+
+    // Finger gestures only while touch input to the PC is off: two fingers pinch-zoom and pan,
+    // one finger pans a zoomed view. Pen and mouse are ignored here, so they keep working.
+    let touches = new Map<number, [number, number]>();
+    let prev: { x: number, y: number, d: number } | null = null;
+    let state = () => {
+        let pts = [...touches.values()];
+        if (pts.length == 0)
+            return null;
+        if (pts.length == 1)
+            return { x: pts[0][0], y: pts[0][1], d: 0 };
+        let [a, b] = pts;
+        return { x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2, d: Math.hypot(a[0] - b[0], a[1] - b[1]) };
+    };
+    let relevant = (e: PointerEvent) => {
+        if (e.pointerType != "touch")
+            return false;
+        if (settings.checks.get("enable_touch").checked) {
+            // touch input is on: fingers behave as usual
+            touches.clear();
+            prev = null;
+            return false;
+        }
+        return true;
+    };
+    video.addEventListener("pointerdown", (e) => {
+        if (!relevant(e))
+            return;
+        touches.set(e.pointerId, [e.clientX, e.clientY]);
+        prev = state();
+    });
+    video.addEventListener("pointermove", (e) => {
+        if (!relevant(e) || !touches.has(e.pointerId))
+            return;
+        touches.set(e.pointerId, [e.clientX, e.clientY]);
+        let cur = state();
+        if (prev && cur) {
+            // a one-finger state has d == 0: no zoom then
+            let r = prev.d > 1 && cur.d > 1 ? cur.d / prev.d : 1;
+            if (r != 1 || view_zoom > 1)
+                zoom_view(r, prev.x, prev.y, cur.x, cur.y);
+        }
+        prev = cur;
+    });
+    let end = (e: PointerEvent) => {
+        if (e.pointerType != "touch" || !touches.delete(e.pointerId))
+            return;
+        // a remaining finger continues as pan
+        prev = state();
+    };
+    video.addEventListener("pointerup", end);
+    video.addEventListener("pointercancel", end);
+    // iOS would otherwise zoom the page itself
+    for (let ev of ["gesturestart", "gesturechange", "gestureend"])
+        video.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
 }

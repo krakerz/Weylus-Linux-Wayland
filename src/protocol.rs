@@ -2,7 +2,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ClientConfiguration {
-    #[cfg(target_os = "linux")]
     pub uinput_support: bool,
     pub capturable_id: usize,
     pub capture_cursor: bool,
@@ -10,6 +9,12 @@ pub struct ClientConfiguration {
     pub max_height: usize,
     pub client_name: Option<String>,
     pub frame_rate: f64,
+    /// target video bitrate; 0 = encoder's constant-quality default
+    #[serde(default)]
+    pub bitrate_mbps: f64,
+    /// video codecs the client wants, best first (`h264`, `hevc`, `av1`); unknown names are ignored
+    #[serde(default)]
+    pub codecs: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -17,12 +22,19 @@ pub enum MessageInbound {
     PointerEvent(PointerEvent),
     WheelEvent(WheelEvent),
     KeyboardEvent(KeyboardEvent),
+    /// Reply with the remembered screen share if there is one, else open a new portal session.
     GetCapturableList,
+    /// Always open a new portal session (the screen picker shows again).
+    RefreshCapturableList,
     Config(ClientConfiguration),
     PauseVideo,
     ResumeVideo,
     RestartVideo,
+    RequestKeyframe,
     ChooseCustomInputAreas,
+    ClientLog(String),
+    /// sent before GetCapturableList/RefreshCapturableList: PipeWire fixes the cursor mode when the portal session starts
+    SetCaptureCursor(bool),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -76,48 +88,49 @@ pub enum PointerType {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum PointerEventType {
     #[serde(rename = "pointerdown")]
-    DOWN,
+    Down,
     #[serde(rename = "pointerup")]
-    UP,
+    Up,
     #[serde(rename = "pointercancel")]
-    CANCEL,
+    Cancel,
     #[serde(rename = "pointermove")]
-    MOVE,
+    Move,
     #[serde(rename = "pointerover")]
-    OVER,
+    Over,
     #[serde(rename = "pointerenter")]
-    ENTER,
+    Enter,
     #[serde(rename = "pointerleave")]
-    LEAVE,
+    Leave,
     #[serde(rename = "pointerout")]
-    OUT,
+    Out,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum KeyboardEventType {
     #[serde(rename = "down")]
-    DOWN,
+    Down,
     #[serde(rename = "up")]
-    UP,
+    Up,
     #[serde(rename = "repeat")]
-    REPEAT,
+    Repeat,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum KeyboardLocation {
-    STANDARD,
-    LEFT,
-    RIGHT,
-    NUMPAD,
+    Standard,
+    Left,
+    Right,
+    Numpad,
 }
 
 fn location_from<'de, D: Deserializer<'de>>(deserializer: D) -> Result<KeyboardLocation, D::Error> {
     let code: u8 = Deserialize::deserialize(deserializer)?;
     match code {
-        0 => Ok(KeyboardLocation::STANDARD),
-        1 => Ok(KeyboardLocation::LEFT),
-        2 => Ok(KeyboardLocation::RIGHT),
-        3 => Ok(KeyboardLocation::NUMPAD),
+        0 => Ok(KeyboardLocation::Standard),
+        1 => Ok(KeyboardLocation::Left),
+        2 => Ok(KeyboardLocation::Right),
+        3 => Ok(KeyboardLocation::Numpad),
         _ => Err(serde::de::Error::custom(
             "Failed to parse keyboard location code.",
         )),
@@ -139,10 +152,7 @@ bitflags! {
 
 fn button_from<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Button, D::Error> {
     let bits: u8 = Deserialize::deserialize(deserializer)?;
-    Button::from_bits(bits).map_or(
-        Err(serde::de::Error::custom("Failed to parse button code.")),
-        Ok,
-    )
+    Button::from_bits(bits).ok_or(serde::de::Error::custom("Failed to parse button code."))
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -192,6 +202,8 @@ pub trait WeylusSender {
     type Error: std::error::Error;
     fn send_message(&mut self, message: MessageOutbound) -> Result<(), Self::Error>;
     fn send_video(&mut self, bytes: &[u8]) -> Result<(), Self::Error>;
+    /// Video messages handed to `send_video` that haven't been written to the socket yet.
+    fn video_backlog(&self) -> usize;
 }
 
 pub trait WeylusReceiver: Iterator<Item = Result<MessageInbound, Self::Error>> {

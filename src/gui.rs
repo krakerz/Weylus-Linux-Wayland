@@ -5,29 +5,117 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicBool;
 
 use fltk::app;
-use fltk::enums::{FrameType, LabelType};
+use fltk::enums::{Align, FrameType, LabelType};
 use fltk::image::PngImage;
 use fltk::menu::Choice;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use tracing::{error, info, warn};
 
 use fltk::{
-    app::{awake_callback, App},
+    app::{App, awake_callback},
     button::{Button, CheckButton},
     frame::Frame,
     input::{Input, IntInput},
+    misc::Progress,
     output::Output,
     prelude::*,
     text::{TextBuffer, TextDisplay},
     window::Window,
 };
 
-#[cfg(not(target_os = "windows"))]
 use pnet_datalink as datalink;
 
-use crate::config::{write_config, Config, ThemeType};
+use crate::config::{Config, ThemeType, write_config};
 use crate::protocol::{CustomInputAreas, Rect};
+use crate::update::{self, CheckMode, Status, Updater};
 use crate::web::Web2UiMessage::UInputInaccessible;
+
+fn version_line() -> String {
+    format!(
+        "Version {} · {}",
+        update::current_version(),
+        update::install_kind().describe()
+    )
+}
+
+/// The update widgets, redrawn from the updater's status by a timer on the fltk thread.
+struct UpdateRow {
+    status: Frame,
+    progress: Progress,
+    button: Button,
+    check_now: Button,
+    blocked: bool,
+    last: Option<Status>,
+}
+
+impl UpdateRow {
+    fn render(&mut self, updater: &Updater) {
+        let status = updater.status();
+        let downloading = matches!(status, Status::Downloading { .. });
+        if !downloading && self.last.as_ref() == Some(&status) {
+            return;
+        }
+        let mut tooltip = String::new();
+        let mut button = None;
+        let text = match &status {
+            Status::Idle => version_line(),
+            Status::Checking => "Checking…".to_string(),
+            Status::UpToDate => format!("Weylus {} is up to date", update::current_version()),
+            Status::Available(update) => {
+                button = Some("Update");
+                format!("Weylus {} is available", update.version)
+            }
+            Status::Downloading { version } => {
+                format!("Downloading {version} — {}", updater.progress().describe())
+            }
+            Status::Installed { version } => {
+                button = Some("Restart");
+                format!("Updated to {version}")
+            }
+            Status::CheckFailed(error) => {
+                tooltip = error.clone();
+                format!("Couldn't check: {error}")
+            }
+            Status::UpdateFailed { error, .. } => {
+                button = Some("Retry");
+                tooltip = error.clone();
+                format!("Update failed: {error}")
+            }
+        };
+        let text = if text.chars().count() > 45 {
+            format!("{}…", text.chars().take(44).collect::<String>())
+        } else {
+            text
+        };
+        if downloading {
+            self.progress
+                .set_value(f64::from(updater.progress().fraction().unwrap_or(0.0)));
+            self.progress.set_label(&text);
+            self.status.hide();
+            self.progress.show();
+        } else {
+            self.progress.hide();
+            self.status.set_label(&text);
+            self.status.set_tooltip(&tooltip);
+            self.status.show();
+        }
+        match button {
+            Some(label) => {
+                self.button.set_label(label);
+                self.button.show();
+            }
+            None => self.button.hide(),
+        }
+        let busy = matches!(status, Status::Checking | Status::Downloading { .. });
+        if busy || self.blocked {
+            self.check_now.deactivate();
+        } else {
+            self.check_now.activate();
+        }
+        self.last = Some(status);
+        app::redraw();
+    }
+}
 
 pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     let width = 200;
@@ -35,9 +123,11 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     let padding = 10;
 
     let app = App::default().with_scheme(fltk::app::AppScheme::Gtk);
-    config.gui_theme.map(|th| th.apply());
+    if let Some(th) = config.gui_theme {
+        th.apply()
+    }
     let mut wind = Window::default()
-        .with_size(660, 600)
+        .with_size(660, 650)
         .center_screen()
         .with_label(&format!("Weylus - {}", env!("CARGO_PKG_VERSION")));
     wind.set_xclass("weylus");
@@ -76,57 +166,31 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     check_auto_start.set_tooltip("Start Weylus server immediately on program start.");
     check_auto_start.set_checked(config.auto_start);
 
-    #[cfg(target_os = "linux")]
     let mut check_wayland = CheckButton::default()
         .with_size(70, height)
         .right_of(&check_auto_start, 3 * padding)
         .with_label("Wayland/\nPipeWire\nSupport");
-    #[cfg(target_os = "linux")]
-    {
-        check_wayland.set_tooltip(
-            "EXPERIMENTAL! This may crash your desktop! Enables screen \
-        capturing for Wayland using PipeWire and GStreamer.",
-        );
-        check_wayland.set_checked(config.wayland_support);
-    }
+    check_wayland.set_tooltip(
+        "Capture the screen through xdg-desktop-portal and PipeWire (needed on Wayland).",
+    );
+    check_wayland.set_checked(config.wayland_support);
 
     let mut label_hw_accel = Frame::default()
         .with_size(width, height)
         .below_of(&check_auto_start, padding)
         .with_label("Try Hardware acceleration");
     label_hw_accel.set_tooltip(
-        "On many systems video encoding can be done with hardware \
-        acceleration. By default this is disabled as the quality and stability of video encoding \
-        varies greatly among hardware and drivers. Currently this is only supported on Linux.",
+        "Encode video on the GPU when possible; falls back to software encoding (libx264) otherwise.",
     );
 
     let mut check_native_hw_accel = CheckButton::default()
         .with_size(70, height)
         .below_of(&label_hw_accel, 0);
 
-    #[cfg(target_os = "linux")]
-    {
-        check_native_hw_accel.set_label("VAAPI");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the Video Acceleration API.");
-        check_native_hw_accel.set_checked(config.try_vaapi);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        check_native_hw_accel.set_label("VideoToolbox");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the VideoToolbox API.");
-        check_native_hw_accel.set_checked(config.try_videotoolbox);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        check_native_hw_accel.set_label("Media-\nFoundation");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the MediaFoundation API.");
-        check_native_hw_accel.set_checked(config.try_mediafoundation);
-    }
+    check_native_hw_accel.set_label("VAAPI");
+    check_native_hw_accel
+        .set_tooltip("Try to use hardware acceleration through the Video Acceleration API.");
+    check_native_hw_accel.set_checked(config.try_vaapi);
 
     let mut check_nvenc = CheckButton::default()
         .with_size(70, height)
@@ -134,14 +198,7 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
         .with_label("NVENC");
     check_nvenc.set_tooltip("Try to use Nvidia's NVENC to encode the video via GPU.");
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
     check_nvenc.set_checked(config.try_nvenc);
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        check_nvenc.deactivate();
-        check_nvenc.hide();
-    }
 
     let mut but_toggle = Button::default()
         .with_size(width, height)
@@ -169,13 +226,49 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     for theme in ThemeType::themes() {
         choice_theme.add_choice(&theme.name());
     }
-    choice_theme.set_value(config.gui_theme.unwrap_or(ThemeType::default()).to_index());
+    choice_theme.set_value(config.gui_theme.unwrap_or_default().to_index());
 
     let mut qr_frame = Frame::default()
         .with_size(235, 235)
         .right_of(&input_bind_addr, padding);
 
     qr_frame.hide();
+
+    let update_blocker = update::install_kind().update_blocker();
+    let row_y = output.y() + output.height() + padding;
+    let mut update_status = Frame::default()
+        .with_size(270, height)
+        .with_pos(30, row_y)
+        .with_label(&version_line());
+    update_status.set_align(Align::Left | Align::Inside);
+    if let Some(reason) = &update_blocker {
+        update_status.set_tooltip(reason);
+    }
+    let mut update_progress = Progress::default()
+        .with_size(270, height)
+        .with_pos(30, row_y);
+    update_progress.set_minimum(0.0);
+    update_progress.set_maximum(1.0);
+    update_progress.hide();
+    let mut but_update = Button::default()
+        .with_size(80, height)
+        .right_of(&update_status, padding)
+        .with_label("Update");
+    but_update.hide();
+    let mut but_check_now = Button::default()
+        .with_size(100, height)
+        .right_of(&but_update, padding)
+        .with_label("Check now");
+    let mut check_updates = CheckButton::default()
+        .with_size(120, height)
+        .right_of(&but_check_now, padding)
+        .with_label("Check at startup");
+    check_updates.set_checked(config.check_updates);
+    check_updates.set_tooltip("Look for a newer Weylus release when Weylus starts.");
+    if update_blocker.is_some() {
+        but_check_now.deactivate();
+        check_updates.deactivate();
+    }
 
     wind.make_resizable(true);
     wind.end();
@@ -194,6 +287,47 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     let mut is_server_running = false;
     let auto_start = config.auto_start;
     let config = Arc::new(Mutex::new(config.clone()));
+
+    let updater = Updater::new();
+    {
+        let config = config.clone();
+        check_updates.set_callback(move |cb| {
+            config.lock().unwrap().check_updates = cb.is_checked();
+            write_config(&config.lock().unwrap());
+        });
+    }
+    {
+        let updater = updater.clone();
+        but_check_now.set_callback(move |_| updater.check_in_background(CheckMode::Manual));
+    }
+    {
+        let updater = updater.clone();
+        but_update.set_callback(move |_| match updater.status() {
+            Status::Available(_) | Status::UpdateFailed { .. } => updater.apply_in_background(),
+            Status::Installed { .. } => {
+                update::request_relaunch();
+                app.quit();
+            }
+            _ => {}
+        });
+    }
+    if config.lock().unwrap().check_updates {
+        updater.check_in_background(CheckMode::Quiet);
+    }
+    {
+        let mut row = UpdateRow {
+            status: update_status,
+            progress: update_progress,
+            button: but_update,
+            check_now: but_check_now,
+            blocked: update_blocker.is_some(),
+            last: None,
+        };
+        app::add_timeout3(0.15, move |handle| {
+            row.render(&updater);
+            app::repeat_timeout3(0.15, handle);
+        });
+    }
 
     {
         let config = config.clone();
@@ -225,23 +359,9 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     config.bind_address = bind_addr;
                     config.auto_start = check_auto_start.is_checked();
                     config.gui_theme = Some(ThemeType::from_index(choice_theme.value()));
-                    #[cfg(target_os = "linux")]
-                    {
-                        config.try_vaapi = check_native_hw_accel.is_checked();
-                        config.wayland_support = check_wayland.is_checked();
-                    }
-                    #[cfg(any(target_os = "linux", target_os = "windows"))]
-                    {
-                        config.try_nvenc = check_nvenc.is_checked();
-                    }
-                    #[cfg(target_os = "macos")]
-                    {
-                        config.try_videotoolbox = check_native_hw_accel.is_checked();
-                    }
-                    #[cfg(target_os = "windows")]
-                    {
-                        config.try_mediafoundation = check_native_hw_accel.is_checked();
-                    }
+                    config.try_vaapi = check_native_hw_accel.is_checked();
+                    config.wayland_support = check_wayland.is_checked();
+                    config.try_nvenc = check_nvenc.is_checked();
                 }
                 if !weylus.start(&config, |message| match message {
                     UInputInaccessible => awake_callback(move || {
@@ -273,7 +393,6 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
 
                 let mut web_sock = SocketAddr::new(config.bind_address, config.web_port);
 
-                #[cfg(not(target_os = "windows"))]
                 {
                     if web_sock.ip().is_unspecified() {
                         // try to guess an ip
@@ -305,7 +424,6 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     }
                 }
 
-                #[cfg(not(target_os = "windows"))]
                 {
                     use image::Luma;
                     use qrcode::QrCode;
@@ -346,14 +464,6 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     cb(&mut qr_frame, x, y, w, h);
                     qr_frame.resize_callback(cb);
                     qr_frame.show();
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    if web_sock.ip().is_unspecified() {
-                        output_server_addr.set_value("http://<your ip address>");
-                    } else {
-                        output_server_addr.set_value(&format!("http://{}", web_sock.to_string()));
-                    }
                 }
                 output_server_addr.show();
                 but.set_label("Stop");
@@ -483,15 +593,11 @@ fn create_custom_input_area_window() -> InputAreaWindowContext {
     choice_pen.set_tooltip(tool_tip);
 
     frame.handle(|frame, event| match event {
-        fltk::enums::Event::Push => {
-            if app::event_clicks() {
-                if let Some(mut win) = frame.window() {
-                    win.fullscreen(!win.fullscreen_active());
-                }
-                true
-            } else {
-                false
+        fltk::enums::Event::Push if app::event_clicks() => {
+            if let Some(mut win) = frame.window() {
+                win.fullscreen(!win.fullscreen_active());
             }
+            true
         }
         _ => false,
     });
@@ -577,8 +683,8 @@ fn custom_input_area_window_handle_events(
     win.handle(move |win, event| {
         match event {
             fltk::enums::Event::Move => {
-                let (x, y) = get_screen_coords_from_event_coords(&win, app::event_coords());
-                let flags = get_mouse_flags(&win, x, y);
+                let (x, y) = get_screen_coords_from_event_coords(win, app::event_coords());
+                let flags = get_mouse_flags(win, x, y);
                 set_cursor(win, &mut current_cursor, Some(flags));
                 true
             }
@@ -587,19 +693,19 @@ fn custom_input_area_window_handle_events(
                 true
             }
             fltk::enums::Event::Push => {
-                (x, y) = get_screen_coords_from_event_coords(&win, app::event_coords());
+                (x, y) = get_screen_coords_from_event_coords(win, app::event_coords());
                 win_x_drag_start = win.x();
                 win_y_drag_start = win.y();
                 win_w_drag_start = win.w();
                 win_h_drag_start = win.h();
-                drag_flags = get_mouse_flags(&win, x, y);
+                drag_flags = get_mouse_flags(win, x, y);
                 true
             }
             fltk::enums::Event::Drag => {
                 if win.opacity() == 1.0 {
                     win.set_opacity(0.5);
                 }
-                let (x_new, y_new) = get_screen_coords_from_event_coords(&win, app::event_coords());
+                let (x_new, y_new) = get_screen_coords_from_event_coords(win, app::event_coords());
                 let dx = x_new - x;
                 let dy = y_new - y;
                 match drag_flags {

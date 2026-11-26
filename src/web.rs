@@ -13,14 +13,14 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-use crate::websocket::{weylus_websocket_channel, WeylusClientConfig, WeylusClientHandler};
+use crate::websocket::{WeylusClientConfig, WeylusClientHandler, weylus_websocket_channel};
 
 #[derive(Debug)]
 pub enum WebStartUpMessage {
@@ -97,11 +97,11 @@ async fn serve(
                 let params = form_urlencoded::parse(query.as_bytes())
                     .into_owned()
                     .collect::<HashMap<String, String>>();
-                if let Some(code) = params.get("access_code") {
-                    if code == access_code {
-                        authed = true;
-                        debug!(address = ?addr, "Web-Client authenticated.");
-                    }
+                if let Some(code) = params.get("access_code")
+                    && code == access_code
+                {
+                    authed = true;
+                    debug!(address = ?addr, "Web-Client authenticated.");
                 }
             }
         }
@@ -124,8 +124,8 @@ async fn serve(
             }
             let config = IndexTemplateContext {
                 access_code: context.web_config.access_code.clone(),
-                uinput_enabled: cfg!(target_os = "linux"),
-                capture_cursor_enabled: cfg!(not(target_os = "windows")),
+                uinput_enabled: true,
+                capture_cursor_enabled: true,
                 log_level: crate::log::get_log_level().to_string(),
                 enable_custom_input_areas: context.web_config.enable_custom_input_areas,
             };
@@ -163,7 +163,7 @@ async fn serve(
             let (response, fut) = upgrade::upgrade(&mut req).unwrap();
             num_clients.fetch_add(1, Ordering::Relaxed);
 
-            let config = context.weylus_client_config.clone();
+            let config = context.weylus_client_config;
             tokio::spawn(async move {
                 match fut.await {
                     Ok(ws) => {
@@ -302,6 +302,11 @@ async fn run_server(
 
         debug!(address = ?remote_address, "Client connected.");
 
+        if let Err(err) = tcp.set_nodelay(true) {
+            warn!("Failed to set TCP_NODELAY: {err}.");
+        }
+        limit_unsent_bytes(&tcp);
+
         let io = TokioIo::new(tcp);
 
         let sender_ui = sender_ui.clone();
@@ -364,5 +369,31 @@ async fn run_server(
                 semaphore_websocket_shutdown.add_permits(num_clients.load(Ordering::Relaxed));
             },
         }
+    }
+}
+
+/// Unsent bytes the kernel may hold per socket; beyond this, writes wait, so the video backlog
+/// counter in websocket.rs sees a slow link instead of an ever-growing send buffer.
+const TCP_NOTSENT_LOWAT_BYTES: libc::c_int = 128 * 1024;
+
+fn limit_unsent_bytes(tcp: &tokio::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: the fd is valid for the duration of the call and optval points to a live c_int of
+    // the given size.
+    let ret = unsafe {
+        libc::setsockopt(
+            tcp.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_NOTSENT_LOWAT,
+            (&TCP_NOTSENT_LOWAT_BYTES as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        warn!(
+            "Failed to set TCP_NOTSENT_LOWAT: {}.",
+            std::io::Error::last_os_error()
+        );
     }
 }

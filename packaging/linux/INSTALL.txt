@@ -1,0 +1,98 @@
+Weylus
+
+Use your tablet as graphic tablet/touch screen on your computer.
+
+
+Requirements
+------------
+- x86_64 Linux with glibc 2.39 or newer (Ubuntu 24.04, Debian 13, current
+  Fedora, Arch, openSUSE).
+- A Wayland session with xdg-desktop-portal (ScreenCast interface) and
+  PipeWire, and a portal backend for your compositor.
+
+
+Runtime packages
+----------------
+FFmpeg is included in this download, so don't install it for Weylus.
+
+Arch Linux:
+  pipewire xdg-desktop-portal gst-plugin-pipewire mesa libva-utils, plus one
+  portal backend: xdg-desktop-portal-gnome, xdg-desktop-portal-kde,
+  xdg-desktop-portal-wlr or xdg-desktop-portal-hyprland; for Intel GPUs
+  intel-media-driver. Weylus itself links: libva gstreamer
+  gst-plugins-base-libs
+Ubuntu 24.04 / Debian 13:
+  pipewire xdg-desktop-portal gstreamer1.0-pipewire mesa-va-drivers and one
+  portal backend: xdg-desktop-portal-gnome, xdg-desktop-portal-kde or
+  xdg-desktop-portal-wlr (no Hyprland portal package in these releases); for
+  Intel GPUs intel-media-va-driver. Weylus itself links: libva2 libva-drm2
+  libgstreamer1.0-0 libgstreamer-plugins-base1.0-0
+Fedora, openSUSE:
+  the packages providing libva, libva-drm, the GStreamer 1.24 base libraries
+  and the GStreamer PipeWire plugin (package names not verified), plus a
+  portal backend and PipeWire.
+
+The rest (D-Bus, Wayland, Pango, cairo, X11 client libraries) is part of
+every desktop install. To see whether a library is missing, run:
+  ldd ./weylus | grep "not found"
+
+Optional, for hardware encoding: a VA-API driver (Mesa: mesa-va-drivers or
+mesa; Intel: intel-media-va-driver or intel-media-driver), or for NVENC the
+NVIDIA driver 530 or newer, then start Weylus with --try-nvenc.
+
+
+Install
+-------
+  ./install.sh
+
+copies weylus to ~/.local/bin, plus the desktop entry and the icon under
+~/.local/share. Use ./install.sh --prefix DIR to install somewhere else and
+./install.sh --uninstall to remove it again (with the same --prefix if you
+used one). You can also just run ./weylus from this folder.
+
+
+uinput
+------
+Weylus uses the uinput interface to simulate input events. To enable stylus
+and multi-touch support /dev/uinput needs to be writable by Weylus. To make
+/dev/uinput permanently writable by your user, run:
+
+  sudo groupadd -r uinput
+  sudo usermod -aG uinput $USER
+  echo 'KERNEL=="uinput", MODE="0660", GROUP="uinput", OPTIONS+="static_node=uinput"' \
+  | sudo tee /etc/udev/rules.d/60-weylus.rules
+
+Then, either reboot, or run
+
+  sudo udevadm control --reload
+  sudo udevadm trigger
+
+then log out and log in again. To undo this, run:
+
+  sudo rm /etc/udev/rules.d/60-weylus.rules
+
+This allows your user to synthesize input events system-wide, even when
+another user is logged in. Therefore, untrusted users should not be added to
+the uinput group.
+
+
+Start
+-----
+Run weylus (or start it from the app menu) and open the address it shows on
+your tablet. Settings are saved when you use the window, and weylus --help
+lists the options.
+
+
+Bundled software
+----------------
+- FFmpeg 7.1.2 (LGPL/GPL; built with x264, so GPL):
+  https://ffmpeg.org/releases/ffmpeg-7.1.2.tar.xz
+- x264 (GPL): https://code.videolan.org/videolan/x264, commit
+  b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+
+Both are linked statically; the exact build is ci/build-ffmpeg.sh in the
+Weylus source. Weylus is AGPL-3.0 (LICENSE); the icon is from Lucide
+(LUCIDE-LICENSE).
+
+
+https://github.com/krakerz/Weylus-Linux-Wayland

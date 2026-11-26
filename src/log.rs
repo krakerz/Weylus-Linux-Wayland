@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::layer::SubscriberExt;
 
-extern "C" {
+unsafe extern "C" {
     fn init_ffmpeg_logger();
 }
 
@@ -90,32 +90,32 @@ pub fn setup_logging(sender: mpsc::SyncSender<String>) {
     }
 }
 
-#[no_mangle]
-fn log_error_rust(msg: *const c_char) {
+#[unsafe(no_mangle)]
+extern "C" fn log_error_rust(msg: *const c_char) {
     let msg = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
     error!("{}", msg);
 }
 
-#[no_mangle]
-fn log_debug_rust(msg: *const c_char) {
+#[unsafe(no_mangle)]
+extern "C" fn log_debug_rust(msg: *const c_char) {
     let msg = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
     debug!("{}", msg);
 }
 
-#[no_mangle]
-fn log_info_rust(msg: *const c_char) {
+#[unsafe(no_mangle)]
+extern "C" fn log_info_rust(msg: *const c_char) {
     let msg = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
     info!("{}", msg);
 }
 
-#[no_mangle]
-fn log_trace_rust(msg: *const c_char) {
+#[unsafe(no_mangle)]
+extern "C" fn log_trace_rust(msg: *const c_char) {
     let msg = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
     trace!("{}", msg);
 }
 
-#[no_mangle]
-fn log_warn_rust(msg: *const c_char) {
+#[unsafe(no_mangle)]
+extern "C" fn log_warn_rust(msg: *const c_char) {
     let msg = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
     warn!("{}", msg);
 }

@@ -160,6 +160,10 @@ void init_stylus(int fd, const char* name, Error* err)
 		ERROR(err, 1, "error: ioctl UI_SET_EVBIT EV_MSC");
 	if (ioctl(fd, UI_SET_MSCBIT, MSC_TIMESTAMP) < 0)
 		ERROR(err, 1, "error: ioctl UI_SET_MSCBIT MSC_TIMESTAMP");
+	// without a serial libinput treats the pen as non-unique and wlroots-style compositors
+	// (Hyprland) recreate the tool on every stroke, which makes Qt apps lose the pen-up
+	if (ioctl(fd, UI_SET_MSCBIT, MSC_SERIAL) < 0)
+		ERROR(err, 1, "error: ioctl UI_SET_MSCBIT MSC_SERIAL");
 
 	if (ioctl(fd, UI_SET_EVBIT, EV_ABS) < 0)
 		ERROR(err, 1, "error: ioctl UI_SET_EVBIT EV_ABS");
@@ -170,9 +174,10 @@ void init_stylus(int fd, const char* name, Error* err)
 	OK_OR_ABORT(err);
 	setup_abs(fd, ABS_PRESSURE, 0, ABS_MAXVAL, 12, err);
 	OK_OR_ABORT(err);
-	setup_abs(fd, ABS_TILT_X, -90, 90, 12, err);
+	// tilt values are degrees; the kernel's ABS_TILT resolution is units per radian
+	setup_abs(fd, ABS_TILT_X, -90, 90, 57, err);
 	OK_OR_ABORT(err);
-	setup_abs(fd, ABS_TILT_Y, -90, 90, 12, err);
+	setup_abs(fd, ABS_TILT_Y, -90, 90, 57, err);
 	OK_OR_ABORT(err);
 
 	setup(fd, name, err);
