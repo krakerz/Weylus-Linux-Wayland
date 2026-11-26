@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, trace, warn};
 
-use crate::capturable::{Capturable, Recorder, get_capturables};
+use crate::capturable::{Capturable, Recorder, ScreenRestore, get_capturables};
 use crate::input::device::InputDevice;
 use crate::protocol::{
     ClientConfiguration, KeyboardEvent, MessageInbound, MessageOutbound, PointerEvent,
@@ -18,6 +18,7 @@ use crate::protocol::{
 };
 
 use crate::cerror::CErrorCode;
+use crate::clients::VideoInfo;
 use crate::codec::CodecOrder;
 use crate::video::{EncoderOptions, VideoEncoder};
 
@@ -146,7 +147,6 @@ pub struct WeylusClientConfig {
     pub wayland_support: bool,
     /// keep the screen share (and its running capture) across connections
     pub remember_screen: bool,
-    pub no_gui: bool,
 }
 
 impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
@@ -155,6 +155,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
         receiver: R,
         on_uinput_inaccessible: FnUInput,
         config: WeylusClientConfig,
+        report_video: Box<dyn Fn(VideoInfo) + Send>,
     ) -> Self
     where
         R: WeylusReceiver,
@@ -171,6 +172,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                     sender,
                     config.encoder_options,
                     config.remember_screen,
+                    report_video,
                 )
             })
         };
@@ -216,6 +218,12 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                         MessageInbound::RestartVideo => {
                             self.video_sender.send(VideoCommands::Restart).unwrap()
                         }
+                        MessageInbound::Ping(client_ms) => {
+                            self.send_message(MessageOutbound::Pong {
+                                client_ms,
+                                server_ms: crate::video::unix_ms(),
+                            })
+                        }
                         MessageInbound::ClientLog(msg) => info!("Client: {msg}"),
                         MessageInbound::SetCaptureCursor(c) => self.capture_cursor = c,
                         MessageInbound::RequestKeyframe => self
@@ -224,7 +232,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                             .unwrap(),
                         MessageInbound::ChooseCustomInputAreas => {
                             let (sender, receiver) = std::sync::mpsc::channel();
-                            crate::gui::get_input_area(self.config.no_gui, sender);
+                            crate::desktop::request_input_areas(sender);
                             let mut sender = self.sender.clone();
                             spawn(move || {
                                 while let Ok(areas) = receiver.recv() {
@@ -301,7 +309,13 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                 if remember {
                     forget_screen();
                 }
-                let capturables = get_capturables(self.config.wayland_support, self.capture_cursor);
+                let restore = match (remember, refresh) {
+                    (false, _) => ScreenRestore::Off,
+                    (true, false) => ScreenRestore::Restore,
+                    (true, true) => ScreenRestore::Replace,
+                };
+                let capturables =
+                    get_capturables(self.config.wayland_support, self.capture_cursor, restore);
                 // an empty list is a failed session, don't keep it
                 // every portal session gets its own generation: a refreshed session can reuse
                 // the stream's node id, so the name alone doesn't tell the sources apart
@@ -394,6 +408,7 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
     mut sender: S,
     base_options: EncoderOptions,
     remember_screen: bool,
+    report_video: Box<dyn Fn(VideoInfo) + Send>,
 ) {
     const EFFECTIVE_INIFINITY: Duration = Duration::from_secs(3600 * 24 * 365 * 200);
 
@@ -410,6 +425,8 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
     let mut last_frame = Instant::now();
     let mut paused = false;
     let mut encoder_options = base_options;
+    let mut fps = 0.0;
+    let mut video_info: Option<VideoInfo> = None;
 
     loop {
         let now = Instant::now();
@@ -508,6 +525,11 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                     EFFECTIVE_INIFINITY
                 };
                 frame_duration = frame_duration.min(EFFECTIVE_INIFINITY);
+                fps = config.frame_rate;
+                if let Some(info) = video_info.as_mut() {
+                    info.fps = fps;
+                    report_video(info.clone());
+                }
 
                 let options = EncoderOptions {
                     codecs: config.codecs,
@@ -574,21 +596,36 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                         .check_size(width_in, height_in, width_out, height_out)
                 {
                     send_message(&mut sender, MessageOutbound::NewVideo);
-                    let mut sender = sender.clone();
+                    let mut video_sender = sender.clone();
                     let res = VideoEncoder::new(
                         width_in,
                         height_in,
                         width_out,
                         height_out,
                         move |data| {
-                            if let Err(err) = sender.send_video(data) {
+                            if let Err(err) = video_sender.send_video(data) {
                                 warn!("Failed to send video frame: {err}!");
                             }
                         },
                         encoder_options,
                     );
                     match res {
-                        Ok(r) => video_encoder = Some(r),
+                        Ok(r) => {
+                            let info = VideoInfo {
+                                encoder: r.codec_name().unwrap_or_default(),
+                                width: width_out,
+                                height: height_out,
+                                fps,
+                            };
+                            report_video(info.clone());
+                            video_info = Some(info);
+                            // same ordered channel as the video: the epoch arrives before the first frame
+                            send_message(
+                                &mut sender,
+                                MessageOutbound::VideoEpoch(r.epoch_unix_ms()),
+                            );
+                            video_encoder = Some(r);
+                        }
                         Err(e) => {
                             warn!("{}", e);
                             continue;
@@ -667,6 +704,7 @@ impl WeylusSender for WsWeylusSender {
 pub fn weylus_websocket_channel(
     websocket: WebSocket<TokioIo<Upgraded>>,
     semaphore_shutdown: Arc<tokio::sync::Semaphore>,
+    disconnect: Arc<tokio::sync::Notify>,
 ) -> (WsWeylusSender, WsWeylusReceiver) {
     let (rx, mut tx) = websocket.split(tokio::io::split);
 
@@ -691,6 +729,7 @@ pub fn weylus_websocket_channel(
 
                 let frame = tokio::select! {
                     _ = semaphore_shutdown.acquire() => break,
+                    _ = disconnect.notified() => break,
                     frame = fut => match frame {
                         Ok(frame) => frame,
                         Err(err) => {

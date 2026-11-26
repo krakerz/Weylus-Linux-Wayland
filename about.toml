@@ -1,0 +1,20 @@
+# Licences accepted for the bundled Rust crates; THIRD-PARTY-LICENSES is generated from
+# this file and about.hbs by ci/package-linux.sh (cargo-about).
+accepted = [
+    "0BSD",
+    "AGPL-3.0-or-later",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+targets = ["x86_64-unknown-linux-gnu"]

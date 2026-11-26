@@ -1,6 +1,6 @@
 {
   "private": true,
   "name": "weylus-web",
-  "scripts": { "build": "tsc" },
+  "scripts": { "build": "tsc && tsc -p tsconfig.desktop.json" },
   "devDependencies": { "typescript": "^5" }
 }

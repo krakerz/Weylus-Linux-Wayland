@@ -6,20 +6,17 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-    build-essential pkg-config cmake git curl ca-certificates \
+    build-essential pkg-config git curl ca-certificates \
     libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libva-dev \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libdbus-1-dev \
-    libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev libxrender-dev \
-    libxfixes-dev \
-    libpango1.0-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev wayland-protocols \
-    libxkbcommon-dev nodejs npm
+    libwebkit2gtk-4.1-dev libwayland-dev wayland-protocols libxkbcommon-dev nodejs npm
 
 MSRV="$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
     sh -s -- -y --profile minimal --default-toolchain "$MSRV"
 . "$HOME/.cargo/env"
 
-pkg-config --modversion libavcodec libavfilter libavutil libva gstreamer-1.0
+pkg-config --modversion libavcodec libavfilter libavutil libva gstreamer-1.0 webkit2gtk-4.1
 rustc --version
 
 npm ci

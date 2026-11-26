@@ -1,5 +1,5 @@
 use std::os::raw::{c_int, c_uchar, c_void};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tracing::warn;
 
@@ -20,7 +20,6 @@ unsafe extern "C" {
         codec: c_int,
     ) -> *mut c_void;
     fn request_keyframe(handle: *mut c_void);
-    #[cfg(test)]
     fn get_codec_name(handle: *mut c_void) -> *const std::os::raw::c_char;
     #[cfg(test)]
     fn avcodec_find_encoder_by_name(name: *const std::os::raw::c_char) -> *const c_void;
@@ -104,7 +103,18 @@ pub struct VideoEncoder {
     height_out: usize,
     write_data: WriteData,
     start_time: Instant,
+    /// `start_time` as unix ms: pts (ms since `start_time`) + this = wall clock of the frame
+    start_unix_ms: f64,
     packetizer: Packetizer,
+}
+
+/// Wall-clock time in unix milliseconds (stats overlay timestamps).
+pub fn unix_ms() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0
 }
 
 impl VideoEncoder {
@@ -124,6 +134,7 @@ impl VideoEncoder {
             height_out,
             write_data: Box::new(move |data| write_data(data)),
             start_time: Instant::now(),
+            start_unix_ms: unix_ms(),
             packetizer: Packetizer::new(Codec::H264),
         });
         let mut last_err = None;
@@ -199,7 +210,10 @@ impl VideoEncoder {
         unsafe { request_keyframe(self.handle) }
     }
 
-    #[cfg(test)]
+    pub fn epoch_unix_ms(&self) -> f64 {
+        self.start_unix_ms
+    }
+
     pub fn codec_name(&self) -> Option<String> {
         // SAFETY: the handle is valid for the lifetime of `self` and the returned string is a
         // static codec name owned by libavcodec (or null if no codec is open).

@@ -7,3 +7,4 @@ c_helper/Cargo.lock
 *.tar.gz
 /node_modules
 /dist/
+/gen/

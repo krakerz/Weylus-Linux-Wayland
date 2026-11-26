@@ -59,13 +59,15 @@ Needed to run Weylus.
 - libva, GStreamer and D-Bus, which the binary links against; when built from source also the shared
   libraries of FFmpeg 6.1 or newer (libavcodec, libavformat, libavfilter, libavutil). The release
   downloads include FFmpeg
+- WebKitGTK 4.1 (2.40 or newer) and GTK 3, for the desktop window (linked even with `--no-gui`)
+- Optional: libayatana-appindicator3 (loaded at run time), for the system tray icon; without it Weylus runs without a tray icon and closing the window quits
 
 Package names:
 
 | Distribution | Packages |
 |---|---|
-| Arch Linux | `pipewire xdg-desktop-portal gst-plugin-pipewire mesa libva-utils` (verified with `pacman -Si`), plus one portal backend: `xdg-desktop-portal-gnome`, `xdg-desktop-portal-kde`, `xdg-desktop-portal-wlr` or `xdg-desktop-portal-hyprland`; for Intel GPUs `intel-media-driver` |
-| Ubuntu 24.04 / Debian 13 | the libraries from the Build list plus `pipewire xdg-desktop-portal gstreamer1.0-pipewire mesa-va-drivers` and one portal backend: `xdg-desktop-portal-gnome`, `xdg-desktop-portal-kde` or `xdg-desktop-portal-wlr` (no Hyprland portal package in these releases); for Intel GPUs `intel-media-va-driver` |
+| Arch Linux | `pipewire xdg-desktop-portal gst-plugin-pipewire mesa libva-utils webkit2gtk-4.1` (verified with `pacman -Si`), plus one portal backend: `xdg-desktop-portal-gnome`, `xdg-desktop-portal-kde`, `xdg-desktop-portal-wlr` or `xdg-desktop-portal-hyprland`; for Intel GPUs `intel-media-driver`; optional, for the tray icon: `libayatana-appindicator` |
+| Ubuntu 24.04 / Debian 13 | the libraries from the Build list plus `pipewire xdg-desktop-portal gstreamer1.0-pipewire mesa-va-drivers` and one portal backend: `xdg-desktop-portal-gnome`, `xdg-desktop-portal-kde` or `xdg-desktop-portal-wlr` (no Hyprland portal package in these releases); for Intel GPUs `intel-media-va-driver`; optional, for the tray icon: `libayatana-appindicator3-1` |
 | Fedora, openSUSE | the equivalents of the packages above; use the pkg-config names in [Build](#build) to find the libraries |
 
 ### Build
@@ -76,7 +78,7 @@ Tools:
   older; the required version is `rust-version` in `Cargo.toml`.
 - Node.js with npm (builds the TypeScript web client)
 - pkg-config
-- A C compiler (gcc or clang) and CMake
+- A C compiler (gcc or clang)
 
 Libraries, found through pkg-config (their development files must be installed):
 - FFmpeg 6.1 or newer: `libavcodec` (≥ 60.31.102), `libavformat` (≥ 60.16.100), `libavfilter`
@@ -86,32 +88,29 @@ Libraries, found through pkg-config (their development files must be installed):
   (`gstreamer-plugins-base-1.0`)
 - `dbus-1`
 - Wayland (`wayland-client`, `wayland-protocols`) and `xkbcommon`
-- X11, GL and Pango development files: the build still links the X11 and Pango libraries listed in
-  the Ubuntu/Debian and Arch package lists below; Weylus does not use X11 at runtime
+- `webkit2gtk-4.1` ≥ 2.40 (pulls in GTK 3 and libsoup 3)
 
 Package names:
 
 **Ubuntu 24.04 or Debian 13** (exact list from the project's CI build script):
 ```sh
-sudo apt install build-essential pkg-config cmake nodejs npm curl ca-certificates \
+sudo apt install build-essential pkg-config nodejs npm curl ca-certificates \
 libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libva-dev \
 libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libdbus-1-dev \
-libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev libxrender-dev libxfixes-dev \
-libpango1.0-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev wayland-protocols libxkbcommon-dev
+libwebkit2gtk-4.1-dev libwayland-dev wayland-protocols libxkbcommon-dev
 ```
 `curl` and `ca-certificates` are only needed to install Rust with rustup.
 
 **Arch Linux** (verified with `pacman -Si`):
 ```sh
-sudo pacman -S --needed base-devel pkgconf cmake nodejs npm rustup ffmpeg libva gstreamer \
-gst-plugins-base-libs dbus wayland wayland-protocols libxkbcommon libx11 libxext libxfixes \
-libxinerama libxcursor libxft libxrender pango mesa glu
+sudo pacman -S --needed base-devel pkgconf nodejs npm rustup ffmpeg libva gstreamer \
+gst-plugins-base-libs dbus wayland wayland-protocols libxkbcommon webkit2gtk-4.1
 ```
 Then `rustup default stable` (any Rust 1.92 or newer works).
 
 **Fedora and openSUSE:** the package names differ, so install the development packages that provide
 the libraries above. Check with `pkg-config --modversion libavcodec libva gstreamer-1.0 dbus-1
-wayland-client xkbcommon`. Use the full FFmpeg from RPM Fusion (Fedora) or Packman (openSUSE): the
+wayland-client xkbcommon webkit2gtk-4.1`. Use the full FFmpeg from RPM Fusion (Fedora) or Packman (openSUSE): the
 distribution's default FFmpeg usually lacks the H.264 encoders Weylus needs. This is usually
 required, but was not checked on these distributions.
 
@@ -199,6 +198,8 @@ Run `weylus --help` for the full list. The important options:
 | `--no-gui` | Run without the GUI and start immediately (headless) |
 | `--auto-start` | Start the server immediately on program start |
 | `--access-code <CODE>` | Require an access code on the tablet |
+| `--allowed-clients <LIST>` | Only accept these IP addresses or CIDR ranges, comma-separated (loopback is always allowed) |
+| `--ask-new-devices` | Ask in the desktop window before a device outside the allowed clients connects |
 | `--web-port <PORT>` | Port of the web server (default `1701`) |
 | `--bind-address <ADDR>` | Address to bind to (default `0.0.0.0`) |
 | `--no-wayland` | Do not capture through `xdg-desktop-portal`/PipeWire (Wayland capture is on by default) |
@@ -206,7 +207,6 @@ Run `weylus --help` for the full list. The important options:
 | `--try-nvenc` | Try NVIDIA's NVENC for GPU encoding |
 | `--no-remember-screen` | Ask for the screen on every connection instead of remembering it until restart |
 | `--no-check-updates` | Don't check for a newer release at start-up |
-| `--gui-theme <THEME>` | Theme of the GUI |
 | `--completions <SHELL>` | Print shell completions for bash, elvish, fish, powershell or zsh |
 
 ### Environment variables
@@ -214,6 +214,7 @@ Run `weylus --help` for the full list. The important options:
 - `WEYLUS_LOG_JSON`: set to any value to print logs as JSON, which is easier to parse in scripts
 - `WEYLUS_PEN_LINGER=0`: turns off the pen-linger fix for Qt applications (pen strokes are joined by
   straight lines again)
+- `WEBKIT_DISABLE_DMABUF_RENDERER=1`: try this if the desktop window stays blank (the AppImage sets it already)
 - `LIBVA_DRIVER_NAME`: select a VA-API driver. The available drivers are in `/usr/lib/dri`
   (`ls /usr/lib/dri/ | sed -n 's/^\(\S*\)_drv_video.so$/\1/p'`)
 - `LIBVA_DRIVERS_PATH`: directory to search for VA-API drivers, if they are not in `/usr/lib/dri`
@@ -291,6 +292,12 @@ Then open `http://127.0.0.1:1701` on the device.
 ## License
 Weylus is licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later), see
 [LICENSE](LICENSE).
+
+This fork is modified by Alvi since November 2026; changes are listed in [CHANGELOG.md](CHANGELOG.md).
+Contributed work is under the BSD-3-Clause licence, see [CONTRIBUTORS](CONTRIBUTORS).
+
+Release builds bundle FFmpeg and x264 (GPL; the sources are linked in `INSTALL.txt`), the Lucide
+icons (ISC) and the third-party Rust crates listed in `THIRD-PARTY-LICENSES`.
 
 ---
 

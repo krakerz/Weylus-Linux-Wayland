@@ -114,7 +114,7 @@ impl InstallKind {
     }
 
     /// The file an update replaces and a restart starts.
-    fn target(&self) -> Option<PathBuf> {
+    pub(crate) fn target(&self) -> Option<PathBuf> {
         match self {
             InstallKind::Archive { prefix } => Some(prefix.join("bin/weylus")),
             InstallKind::AppImage { path } => Some(path.clone()),

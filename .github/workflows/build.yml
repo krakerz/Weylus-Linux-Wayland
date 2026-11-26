@@ -24,9 +24,8 @@ jobs:
       - name: Install dependencies
         run: >
           pacman -Syu --noconfirm --needed
-          base-devel git rust ffmpeg libva libx11 libxext libxfixes
-          dbus gstreamer gst-plugins-base-libs cmake wayland wayland-protocols
-          libxkbcommon pango cairo glu mesa libxinerama libxcursor libxft nodejs npm
+          base-devel git rust ffmpeg libva dbus gstreamer gst-plugins-base-libs
+          wayland wayland-protocols libxkbcommon webkit2gtk-4.1 nodejs npm
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Install web dependencies
@@ -59,6 +58,9 @@ jobs:
           bash ci/package-linux.sh deps
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-about
+        # Same version as CARGO_ABOUT_VERSION in ci/package-linux.sh; rust-cache keeps ~/.cargo/bin.
+        run: cargo about --version 2>/dev/null | grep -q " 0.9.3$" || cargo install --locked --features cli cargo-about@0.9.3
       - name: Cache static FFmpeg
         uses: actions/cache@v4
         with:

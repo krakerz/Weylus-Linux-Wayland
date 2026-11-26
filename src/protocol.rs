@@ -35,6 +35,8 @@ pub enum MessageInbound {
     ClientLog(String),
     /// sent before GetCapturableList/RefreshCapturableList: PipeWire fixes the cursor mode when the portal session starts
     SetCaptureCursor(bool),
+    /// client clock in unix ms; answered at once with `Pong` (clock offset and RTT for the stats overlay)
+    Ping(f64),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,6 +47,12 @@ pub enum MessageOutbound {
     CustomInputAreas(CustomInputAreas),
     ConfigError(String),
     Error(String),
+    Pong {
+        client_ms: f64,
+        server_ms: f64,
+    },
+    /// unix ms of pts 0 of the encoder that sends the following video messages
+    VideoEpoch(f64),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -208,4 +216,33 @@ pub trait WeylusSender {
 
 pub trait WeylusReceiver: Iterator<Item = Result<MessageInbound, Self::Error>> {
     type Error: std::error::Error;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_parses() {
+        match serde_json::from_str::<MessageInbound>(r#"{"Ping":1234.5}"#).unwrap() {
+            MessageInbound::Ping(v) => assert_eq!(v, 1234.5),
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pong_and_epoch_json_shape() {
+        let pong = MessageOutbound::Pong {
+            client_ms: 1.0,
+            server_ms: 2.0,
+        };
+        assert_eq!(
+            serde_json::to_string(&pong).unwrap(),
+            r#"{"Pong":{"client_ms":1.0,"server_ms":2.0}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&MessageOutbound::VideoEpoch(5.0)).unwrap(),
+            r#"{"VideoEpoch":5.0}"#
+        );
+    }
 }

@@ -3,7 +3,7 @@ use std::error::Error;
 use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use dbus::{
     Message,
@@ -16,7 +16,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 
-use crate::capturable::{Capturable, Geometry, Recorder};
+use crate::capturable::{Capturable, Geometry, Recorder, ScreenRestore, restore_token};
 use crate::video::PixelProvider;
 
 use crate::capturable::remote_desktop_dbus::{
@@ -359,6 +359,9 @@ struct CallBackContext {
     streams: Vec<PwStreamInfo>,
     fd: Option<OwnedFd>,
     restore_token: Option<String>,
+    /// token from the last session, offered to the portal
+    prior_token: Option<String>,
+    persist: bool,
     has_remote_desktop: bool,
     failure: bool,
 }
@@ -405,17 +408,20 @@ fn select_devices(
         Variant(Box::new(format!("weylus{t}"))),
     );
 
-    // TODO
-    //args.insert(
-    //    "restore_token".to_string(),
-    //    Variant(Box::new(format!("weylus{t}"))),
-    //);
-
     // persist modes:
     // 0: Do not persist (default)
     // 1: Permissions persist as long as the application is running
     // 2: Permissions persist until explicitly revoked
-    args.insert("persist_mode".to_string(), Variant(Box::new(2_u32)));
+    let (persist, prior_token) = {
+        let context = context.lock().unwrap();
+        (context.persist, context.prior_token.clone())
+    };
+    if persist {
+        args.insert("persist_mode".to_string(), Variant(Box::new(2_u32)));
+        if let Some(token) = prior_token {
+            args.insert("restore_token".to_string(), Variant(Box::new(token)));
+        }
+    }
 
     // device types
     // 1: KEYBOARD
@@ -473,6 +479,22 @@ fn select_sources(
         );
     }
     args.insert("cursor_mode".into(), Variant(Box::new(cursor_mode)));
+
+    // RemoteDesktop sessions persist through SelectDevices; ScreenCast has the options since v4
+    let (persist, prior_token, has_remote_desktop) = {
+        let context = context.lock().unwrap();
+        (
+            context.persist,
+            context.prior_token.clone(),
+            context.has_remote_desktop,
+        )
+    };
+    if persist && !has_remote_desktop && OrgFreedesktopPortalScreenCast::version(&portal)? >= 4 {
+        args.insert("persist_mode".into(), Variant(Box::new(2_u32)));
+        if let Some(token) = prior_token {
+            args.insert("restore_token".into(), Variant(Box::new(token)));
+        }
+    }
 
     let path = portal.select_sources(context.lock().unwrap().session.clone(), args)?;
     handle_response(portal, path, context, on_select_sources_response)?;
@@ -539,9 +561,13 @@ fn on_start_response(
     Ok(())
 }
 
+type PortalSession = (SyncConnection, OwnedFd, Vec<PwStreamInfo>, Option<String>);
+
 fn request_remote_desktop(
     capture_cursor: bool,
-) -> Result<(SyncConnection, OwnedFd, Vec<PwStreamInfo>), Box<dyn Error>> {
+    prior_token: Option<String>,
+    persist: bool,
+) -> Result<PortalSession, Box<dyn Error>> {
     let conn = SyncConnection::new_session()?;
     let portal = get_portal(&conn);
 
@@ -555,6 +581,8 @@ fn request_remote_desktop(
         streams: Default::default(),
         fd: None,
         restore_token: None,
+        prior_token,
+        persist,
         has_remote_desktop,
         failure: false,
     };
@@ -593,7 +621,12 @@ fn request_remote_desktop(
     }
     let context = context.lock().unwrap();
     if context.fd.is_some() && !context.streams.is_empty() {
-        Ok((conn, context.fd.clone().unwrap(), context.streams.clone()))
+        Ok((
+            conn,
+            context.fd.clone().unwrap(),
+            context.streams.clone(),
+            context.restore_token.clone(),
+        ))
     } else {
         Err(Box::new(DBusError(
             "Failed to obtain screen capture.".into(),
@@ -601,8 +634,23 @@ fn request_remote_desktop(
     }
 }
 
-pub fn get_capturables(capture_cursor: bool) -> Result<Vec<PipeWireCapturable>, Box<dyn Error>> {
-    let (conn, fd, streams) = request_remote_desktop(capture_cursor)?;
+pub fn get_capturables(
+    capture_cursor: bool,
+    restore: ScreenRestore,
+) -> Result<Vec<PipeWireCapturable>, Box<dyn Error>> {
+    let prior = match restore {
+        ScreenRestore::Restore => restore_token::load(),
+        ScreenRestore::Replace | ScreenRestore::Off => None,
+    };
+    if prior.is_some() {
+        info!("Restoring the shared screen of the last session");
+    }
+    let persist = restore != ScreenRestore::Off;
+    let (conn, fd, streams, token) = request_remote_desktop(capture_cursor, prior, persist)?;
+    if persist {
+        // a portal without restore tokens returns none: drop the stale one
+        restore_token::store(token.as_deref());
+    }
     let conn = Arc::new(conn);
     Ok(streams
         .into_iter()
