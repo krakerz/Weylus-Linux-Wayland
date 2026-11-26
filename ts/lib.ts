@@ -15,6 +15,86 @@ let log_socket: WebSocket | null = null;
 let fps_out: HTMLOutputElement;
 let frame_count = 0;
 let last_fps_calc: number = performance.now();
+let stats_overlay: HTMLElement;
+
+function now_unix_ms(): number {
+    return performance.timeOrigin + performance.now();
+}
+
+// Client-side numbers for the stats overlay. The counters are per interval and reset by frame_rate_stats().
+class VideoStats {
+    bytes = 0;
+    presented = 0;
+    dropped = 0;
+    dropped_total = 0;
+    decode_ms: number[] = [];
+    latency_ms: number[] = [];
+    codec = "";
+    width = 0;
+    height = 0;
+    // unix ms of pts 0 of the current encoder
+    epoch: number | null = null;
+    // server clock minus client clock in ms
+    offset: number | null = null;
+    rtt: number | null = null;
+    pings: { rtt: number, offset: number }[] = [];
+    submitted = new Map<number, number>();
+
+    on_submit(ts_us: number) {
+        let now = performance.now();
+        this.submitted.set(ts_us, now);
+        if (this.submitted.size > 64) {
+            for (let [k, t] of this.submitted) {
+                if (now - t > 2000)
+                    this.submitted.delete(k);
+            }
+        }
+    }
+
+    on_decoded(ts_us: number) {
+        let t = this.submitted.get(ts_us);
+        if (t === undefined)
+            return;
+        this.decode_ms.push(performance.now() - t);
+        this.submitted.delete(ts_us);
+    }
+
+    // call before frame.close()
+    on_present(frame: VideoFrame) {
+        this.presented++;
+        this.width = frame.displayWidth;
+        this.height = frame.displayHeight;
+        if (this.epoch != null && this.offset != null) {
+            let lat = now_unix_ms() + this.offset - (this.epoch + frame.timestamp / 1000);
+            // guards against clock jumps and a stale epoch
+            if (lat >= 0 && lat < 10000)
+                this.latency_ms.push(lat);
+        }
+    }
+
+    on_pong(msg: { client_ms: number, server_ms: number }) {
+        let t = now_unix_ms();
+        let rtt = t - msg.client_ms;
+        let offset = msg.server_ms - (msg.client_ms + t) / 2;
+        this.pings.push({ rtt, offset });
+        if (this.pings.length > 8)
+            this.pings.shift();
+        let best = this.pings[0];
+        for (let p of this.pings) {
+            if (p.rtt < best.rtt)
+                best = p;
+        }
+        this.offset = best.offset;
+        this.rtt = rtt;
+    }
+
+    ping(ws: WebSocket | null) {
+        if (ws && ws.readyState == WebSocket.OPEN)
+            ws.send(JSON.stringify({ "Ping": now_unix_ms() }));
+    }
+}
+
+const video_stats = new VideoStats();
 
 let check_video: HTMLInputElement;
 
@@ -112,6 +192,155 @@ function bitrate_label(v: number) {
 const CODEC_IDS = ["h264", "hevc", "av1"];
 const CODEC_LABELS: { [k: string]: string } = { "h264": "H.264", "hevc": "H.265", "av1": "AV1" };
 
+// KeyboardEvent.code values the shortcut bar may send (must match the uinput map_key test list)
+const COMBO_CODES: Set<string> = new Set([
+    ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((c) => "Key" + c),
+    ..."0123456789".split("").map((c) => "Digit" + c),
+    ...Array.from({ length: 12 }, (_, i) => "F" + (i + 1)),
+    "BracketLeft", "BracketRight", "Minus", "Equal", "Comma", "Period", "Slash", "Backslash",
+    "Semicolon", "Quote", "Backquote", "Space", "Tab", "Enter", "Escape", "Backspace", "Delete",
+    "Insert", "Home", "End", "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "ControlLeft", "ShiftLeft", "AltLeft", "MetaLeft",
+]);
+
+const COMBO_MODIFIERS = ["ControlLeft", "ShiftLeft", "AltLeft", "MetaLeft"];
+const COMBO_ALIASES: { [k: string]: string } = {
+    "ctrl": "ControlLeft", "control": "ControlLeft",
+    "shift": "ShiftLeft",
+    "alt": "AltLeft", "option": "AltLeft",
+    "meta": "MetaLeft", "super": "MetaLeft", "win": "MetaLeft", "cmd": "MetaLeft",
+    "[": "BracketLeft", "]": "BracketRight", "-": "Minus", "=": "Equal", ",": "Comma", ".": "Period",
+    "/": "Slash", "\\": "Backslash", ";": "Semicolon", "'": "Quote", "`": "Backquote",
+    "space": "Space", "tab": "Tab", "enter": "Enter", "return": "Enter", "esc": "Escape", "escape": "Escape",
+    "backspace": "Backspace", "del": "Delete", "delete": "Delete", "ins": "Insert", "insert": "Insert",
+    "home": "Home", "end": "End", "pgup": "PageUp", "pageup": "PageUp", "pgdn": "PageDown", "pagedown": "PageDown",
+    "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight",
+};
+
+// "Ctrl+Shift+Z" -> ["ControlLeft", "ShiftLeft", "KeyZ"]: modifiers in a fixed order, then at most one key.
+// null when anything is unknown. DOM-free.
+function parse_combo(s: string): string[] | null {
+    let mods = new Set<string>();
+    let key: string | null = null;
+    for (let raw of s.split("+")) {
+        let tok = raw.trim();
+        if (tok == "")
+            return null;
+        let lower = tok.toLowerCase();
+        let code: string | undefined;
+        if (Object.prototype.hasOwnProperty.call(COMBO_ALIASES, lower))
+            code = COMBO_ALIASES[lower];
+        else if (/^[a-z]$/.test(lower))
+            code = "Key" + lower.toUpperCase();
+        else if (/^[0-9]$/.test(lower))
+            code = "Digit" + lower;
+        else if (/^f([1-9]|1[0-2])$/.test(lower))
+            code = lower.toUpperCase();
+        else if (COMBO_CODES.has(tok))
+            code = tok;
+        if (code === undefined)
+            return null;
+        if (COMBO_MODIFIERS.includes(code)) {
+            mods.add(code);
+        } else {
+            if (key !== null)
+                return null;
+            key = code;
+        }
+    }
+    let out = COMBO_MODIFIERS.filter((m) => mods.has(m));
+    if (key !== null)
+        out.push(key);
+    return out.length ? out : null;
+}
+
+interface Shortcut { label: string; codes: string[]; hold: boolean; icon?: string }
+
+// One button per line: "label = [hold ]combo" or a bare "[hold ]combo". DOM-free.
+function parse_custom_shortcuts(text: string): { shortcuts: Shortcut[], errors: string[] } {
+    let shortcuts: Shortcut[] = [];
+    let errors: string[] = [];
+    text.split("\n").forEach((raw, i) => {
+        let line = raw.trim();
+        if (line == "" || line.startsWith("#"))
+            return;
+        let label: string | null = null;
+        let rest = line;
+        let eq = line.indexOf("=");
+        // a lone "=" or "Ctrl+=" is a combo, not a label separator
+        if (eq > 0 && line.slice(0, eq).trim() != "") {
+            label = line.slice(0, eq).trim();
+            rest = line.slice(eq + 1).trim();
+        }
+        let hold = false;
+        let m = /^hold\s+(.*)$/i.exec(rest);
+        if (m) {
+            hold = true;
+            rest = m[1].trim();
+        }
+        let codes = parse_combo(rest);
+        if (!codes && label !== null) {
+            // maybe the whole line is a combo containing "=" (e.g. "Ctrl+=")
+            let whole = /^hold\s+(.*)$/i.exec(line);
+            let alt = parse_combo(whole ? whole[1] : line);
+            if (alt) {
+                codes = alt;
+                hold = !!whole;
+                label = null;
+                rest = whole ? whole[1].trim() : line;
+            }
+        }
+        if (!codes) {
+            errors.push("line " + (i + 1) + ": unknown key combo \"" + rest + "\"");
+            return;
+        }
+        shortcuts.push({ label: label ?? rest, codes, hold });
+    });
+    return { shortcuts, errors };
+}
+
+// [label, combo, hold, icon?]
+const SHORTCUT_PRESETS: { [k: string]: [string, string, boolean, string?][] } = {
+    "krita": [
+        ["Undo", "Ctrl+Z", false, "undo"],
+        ["Redo", "Ctrl+Shift+Z", false, "redo"],
+        ["Eraser", "E", false, "eraser"],
+        ["Smaller", "[", false, "smaller"],
+        ["Bigger", "]", false, "bigger"],
+        ["Pan", "Space", true, "pan"],
+        ["Pick", "Ctrl", true, "picker"],
+    ],
+    "gimp": [
+        ["Undo", "Ctrl+Z", false, "undo"],
+        ["Redo", "Ctrl+Y", false, "redo"],
+        ["Brush", "P", false, "pencil"],
+        ["Eraser", "Shift+E", false, "eraser"],
+        ["Smaller", "[", false, "smaller"],
+        ["Bigger", "]", false, "bigger"],
+        ["Pan", "Space", true, "pan"],
+        ["Pick", "Ctrl", true, "picker"],
+    ],
+    "xournalpp": [
+        ["Undo", "Ctrl+Z", false, "undo"],
+        ["Redo", "Ctrl+Y", false, "redo"],
+        ["Pen", "Ctrl+Shift+P", false, "pencil"],
+        ["Eraser", "Ctrl+Shift+E", false, "eraser"],
+        ["Highlighter", "Ctrl+Shift+H", false, "highlighter"],
+        ["Hand", "Ctrl+Shift+A", false, "pan"],
+    ],
+    "generic": [
+        ["Undo", "Ctrl+Z", false, "undo"],
+        ["Redo", "Ctrl+Shift+Z", false, "redo"],
+        ["Ctrl", "Ctrl", true],
+        ["Shift", "Shift", true],
+        ["Alt", "Alt", true],
+        ["Space", "Space", true],
+        ["Esc", "Esc", false],
+        ["Del", "Delete", false],
+    ],
+    "none": [],
+};
+
 class Settings {
     webSocket: WebSocket;
     checks: Map<string, HTMLInputElement>;
@@ -136,6 +365,9 @@ class Settings {
     // the codec the user picked before a fallback to Auto: that is what stays in localStorage
     codec_saved_choice: string | null = null;
     client_name_input: HTMLInputElement;
+    shortcut_preset: HTMLSelectElement;
+    shortcut_side: HTMLSelectElement;
+    shortcut_custom: HTMLTextAreaElement;
     visible: boolean;
     custom_input_areas: CustomInputAreas;
     settings: HTMLElement;
@@ -157,6 +389,9 @@ class Settings {
         this.codec_select = document.getElementById("codec") as HTMLSelectElement;
         this.codec_output = document.getElementById("active_codec") as HTMLOutputElement;
         this.client_name_input = document.getElementById("client_name") as HTMLInputElement;
+        this.shortcut_preset = document.getElementById("shortcut_preset") as HTMLSelectElement;
+        this.shortcut_side = document.getElementById("shortcut_side") as HTMLSelectElement;
+        this.shortcut_custom = document.getElementById("shortcut_custom") as HTMLTextAreaElement;
         this.codecs_probed = this.probe_codecs();
         this.frame_rate_input.oninput = () => {
             this.frame_rate_output.value = Math.round(frame_rate_scale(this.frame_rate_input.valueAsNumber)).toString();
@@ -212,6 +447,29 @@ class Settings {
                 debug_overlay.classList.add("hide");
             }
             this.save_settings();
+        };
+
+        this.checks.get("enable_stats_overlay").onchange = (e) => {
+            stats_overlay.classList.toggle("hide", !(e.target as HTMLInputElement).checked);
+            this.save_settings();
+        };
+
+        this.checks.get("enable_shortcuts").onchange = () => {
+            this.save_settings();
+            shortcut_bar?.rebuild();
+        };
+        this.shortcut_preset.onchange = () => {
+            this.save_settings();
+            shortcut_bar?.rebuild();
+        };
+        this.shortcut_side.onchange = () => {
+            this.save_settings();
+            shortcut_bar?.rebuild();
+        };
+        // fires on blur
+        this.shortcut_custom.onchange = () => {
+            this.save_settings();
+            shortcut_bar?.rebuild();
         };
 
         this.checks.get("enable_video").onchange = (e) => {
@@ -390,6 +648,9 @@ class Settings {
         settings["codec"] = this.codec_saved_choice ?? this.codec_select.value;
         settings["custom_input_areas"] = this.custom_input_areas;
         settings["client_name"] = this.client_name_input.value;
+        settings["shortcut_preset"] = this.shortcut_preset.value;
+        settings["shortcut_side"] = this.shortcut_side.value;
+        settings["shortcut_custom"] = this.shortcut_custom.value;
         localStorage.setItem("settings", JSON.stringify(settings));
     }
 
@@ -463,10 +724,24 @@ class Settings {
                 debug_overlay.classList.remove("hide");
             }
 
+            if (this.checks.get("enable_stats_overlay").checked) {
+                stats_overlay.classList.remove("hide");
+            }
+
 
             if (document.getElementById("custom_input_areas").classList.contains("hide")) {
                 this.checks.get("enable_custom_input_areas").checked = false;
             }
+
+            let shortcut_preset = settings["shortcut_preset"];
+            if (typeof shortcut_preset == "string" && Object.prototype.hasOwnProperty.call(SHORTCUT_PRESETS, shortcut_preset))
+                this.shortcut_preset.value = shortcut_preset;
+            let shortcut_side = settings["shortcut_side"];
+            if (shortcut_side === "left" || shortcut_side === "right")
+                this.shortcut_side.value = shortcut_side;
+            let shortcut_custom = settings["shortcut_custom"];
+            if (typeof shortcut_custom == "string")
+                this.shortcut_custom.value = shortcut_custom;
 
             let client_name = settings["client_name"];
             if (client_name)
@@ -1052,11 +1327,39 @@ class KeyboardHandler {
 
 function frame_rate_stats() {
     let t = performance.now();
-    let fps = Math.round(frame_count / (t - last_fps_calc) * 10000) / 10;
+    let elapsed_s = (t - last_fps_calc) / 1000;
+    let fps = Math.round(frame_count / elapsed_s * 10) / 10;
     fps_out.value = fps.toString();
+    if (settings?.checks.get("enable_stats_overlay")?.checked) {
+        let vs = video_stats;
+        let set = (id: string, v: string | null) => {
+            let el = document.getElementById(id) as HTMLOutputElement | null;
+            if (el)
+                el.value = v ?? "\u2014";
+        };
+        let avg = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+        let shown = Math.round(vs.presented / elapsed_s * 10) / 10;
+        set("stats_fps", fps + " / " + shown);
+        set("stats_decode", vs.decode_ms.length ? avg(vs.decode_ms).toFixed(1) + " ms" : null);
+        set("stats_latency", vs.latency_ms.length
+            ? "avg " + Math.round(avg(vs.latency_ms)) + " ms, max " + Math.round(Math.max(...vs.latency_ms)) + " ms"
+            : null);
+        set("stats_rtt", vs.rtt != null ? Math.round(vs.rtt) + " ms" : null);
+        set("stats_dropped", vs.dropped + " (total " + (vs.dropped_total + vs.dropped) + ")");
+        set("stats_bitrate", (vs.bytes * 8 / elapsed_s / 1e6).toFixed(1) + " Mbps");
+        set("stats_codec", vs.codec || null);
+        set("stats_resolution", vs.width > 0 ? vs.width + "\u00d7" + vs.height : null);
+        vs.ping(log_socket);
+    }
+    video_stats.dropped_total += video_stats.dropped;
+    video_stats.dropped = 0;
+    video_stats.bytes = 0;
+    video_stats.presented = 0;
+    video_stats.decode_ms = [];
+    video_stats.latency_ms = [];
     frame_count = 0;
     last_fps_calc = t;
-    setTimeout(() => frame_rate_stats(), 1500);
+    setTimeout(() => frame_rate_stats(), 1000);
 }
 
 function handle_messages(
@@ -1122,12 +1425,16 @@ function handle_messages(
             stretch_video();
         }
         ctx2d.drawImage(frame, 0, 0);
+        video_stats.on_present(frame);
         frame.close();
     }
 
     function on_frame(frame: VideoFrame) {
+        video_stats.on_decoded(frame.timestamp);
         got_frame = true;
         // render-side drop: only the newest frame per display refresh is drawn
+        if (pending)
+            video_stats.dropped++;
         pending?.close();
         pending = frame;
         if (!raf_scheduled) {
@@ -1174,6 +1481,7 @@ function handle_messages(
         let pts_ms = view.getUint32(4, true);
         settings.show_active_codec(codec_id);
         let codec_name = CODEC_IDS[codec_id] ?? "";
+        video_stats.codec = CODEC_LABELS[codec_name] ?? codec_name;
         if (codec_name != active_codec) {
             active_codec = codec_name;
             fail_times = [];
@@ -1227,19 +1535,23 @@ function handle_messages(
         if (!decoder || !config || decoder.state != "configured") {
             if (!key)
                 request_keyframe();
+            video_stats.dropped++;
             return;
         }
         if (!key && (need_key || decoder.decodeQueueSize > 1)) {
             // a delta frame can't be dropped alone (later frames reference it): skip until the next keyframe
             need_key = true;
             request_keyframe();
+            video_stats.dropped++;
             return;
         }
         if (key && decoder.decodeQueueSize > 1) {
             // the decoder is behind: a keyframe lets us flush the whole queue and resync
+            video_stats.dropped += decoder.decodeQueueSize;
             decoder.reset();
             configure(decoder, config);
         }
+        video_stats.on_submit(pts_ms * 1000);
         try {
             decoder.decode(new EncodedVideoChunk({
                 type: key ? "key" : "delta",
@@ -1248,6 +1560,7 @@ function handle_messages(
             }));
         } catch (e) {
             log(LogLevel.WARN, "Failed to decode video frame: " + e);
+            video_stats.dropped++;
             need_key = true;
             request_keyframe();
             return;
@@ -1262,6 +1575,7 @@ function handle_messages(
             if (typeof msg == "string") {
                 if (msg == "NewVideo") {
                     need_key = true;
+                    video_stats.epoch = null;
                     config = null;
                     config_time = 0;
                     new_decoder();
@@ -1279,6 +1593,10 @@ function handle_messages(
                     settings.custom_input_areas = msg["CustomInputAreas"];
                     settings.checks.get("enable_custom_input_areas").checked = true;
                     settings.save_settings();
+                } else if ("Pong" in msg) {
+                    video_stats.on_pong(msg["Pong"]);
+                } else if ("VideoEpoch" in msg) {
+                    video_stats.epoch = msg["VideoEpoch"];
                 }
             }
 
@@ -1287,6 +1605,7 @@ function handle_messages(
 
         // not a string -> got a video frame
         frame_count += 1;
+        video_stats.bytes += (event.data as ArrayBuffer).byteLength;
         handle_video_message(event.data);
     }
 }
@@ -1295,7 +1614,9 @@ function check_apis() {
     let apis = [
         {
             attrs: ["VideoDecoder"],
-            msg: "This browser doesn't support WebCodecs (VideoDecoder) required to play the video stream, try upgrading (iPadOS 16.4+)!"
+            msg: window.isSecureContext
+                ? "This browser doesn't support WebCodecs (VideoDecoder) required to play the video stream, try upgrading (iPadOS 16.4+)!"
+                : "Video decoding (WebCodecs) needs a secure page: turn on HTTPS in Weylus' settings and open the https:// address."
         },
         {
             attrs: ["PointerEvent"],
@@ -1326,6 +1647,7 @@ function init() {
     log_socket = webSocket;
 
     debug_overlay = document.getElementById("debug_overlay");
+    stats_overlay = document.getElementById("stats_overlay");
     settings = new Settings(webSocket);
 
     let video = document.getElementById("video") as HTMLCanvasElement;
@@ -1343,6 +1665,7 @@ function init() {
     };
 
     init_view_controls(video);
+    shortcut_bar = new ShortcutBar(webSocket);
 
     let toggle_fullscreen_btn = document.getElementById("fullscreen") as HTMLButtonElement;
 
@@ -1465,6 +1788,189 @@ function apply_view_transform() {
         if (out.value != level)
             wake_zoom_controls();
         out.value = level;
+    }
+}
+
+const SHORTCUT_BAR_IDLE_MS = 4000;
+
+let shortcut_bar: ShortcutBar | null = null;
+
+// Edge toolbar that sends key combos to the PC. Every key is its own KeyboardEvent (modifier flags
+// stay false), and held keys are ref-counted so a held Ctrl plus a tapped Undo never releases Ctrl early.
+class ShortcutBar {
+    ws: WebSocket;
+    bar: HTMLElement;
+    buttons: HTMLElement;
+    icons: HTMLTemplateElement;
+    held = new Map<string, number>();
+    // hold buttons currently pressed: release function and the button
+    pressed = new Set<{ release: () => void }>();
+    timer: number | undefined;
+
+    constructor(ws: WebSocket) {
+        this.ws = ws;
+        this.bar = document.getElementById("shortcut_bar");
+        this.buttons = document.getElementById("shortcut_buttons");
+        this.icons = document.getElementById("shortcut_icons") as HTMLTemplateElement;
+        // the bar never reaches the PC
+        for (let ev of ["click", "pointerdown", "pointerup", "pointermove", "pointercancel"])
+            this.bar.addEventListener(ev, (e) => e.stopPropagation());
+        this.bar.addEventListener("contextmenu", (e) => e.preventDefault());
+        // Open from the grip on click, like the zoom controls.
+        document.getElementById("shortcut_grip").onclick = () => this.wake();
+        this.bar.addEventListener("pointerdown", () => {
+            if (!this.bar.classList.contains("collapsed"))
+                this.wake();
+        });
+        window.addEventListener("blur", () => this.release_all());
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden)
+                this.release_all();
+        });
+        this.rebuild();
+    }
+
+    send(code: string, type: "down" | "up") {
+        if (this.ws.readyState != WebSocket.OPEN)
+            return;
+        this.ws.send(JSON.stringify({
+            "KeyboardEvent": {
+                event_type: type, code, key: "", location: 0,
+                alt: false, ctrl: false, shift: false, meta: false,
+            }
+        }));
+    }
+
+    press(codes: string[]) {
+        for (let code of codes) {
+            let n = this.held.get(code) ?? 0;
+            this.held.set(code, n + 1);
+            if (n == 0)
+                this.send(code, "down");
+        }
+    }
+
+    release(codes: string[]) {
+        for (let code of [...codes].reverse()) {
+            let n = this.held.get(code) ?? 0;
+            if (n <= 0)
+                continue;
+            if (n == 1) {
+                this.held.delete(code);
+                this.send(code, "up");
+            } else {
+                this.held.set(code, n - 1);
+            }
+        }
+    }
+
+    release_all() {
+        for (let p of [...this.pressed])
+            p.release();
+        this.pressed.clear();
+        for (let code of [...this.held.keys()])
+            this.send(code, "up");
+        this.held.clear();
+    }
+
+    rebuild() {
+        this.release_all();
+        let enabled = settings.checks.get("enable_shortcuts").checked;
+        let list: Shortcut[] = [];
+        let preset = SHORTCUT_PRESETS[settings.shortcut_preset.value] ?? [];
+        for (let [label, combo, hold, icon] of preset) {
+            let codes = parse_combo(combo);
+            if (codes)
+                list.push({ label, codes, hold, icon });
+        }
+        let custom = parse_custom_shortcuts(settings.shortcut_custom.value);
+        list.push(...custom.shortcuts);
+        let status = document.getElementById("shortcut_custom_status") as HTMLOutputElement | null;
+        if (status)
+            status.value = custom.errors.join("\n");
+
+        this.bar.classList.toggle("hide", !enabled || list.length == 0);
+        this.bar.classList.toggle("right", settings.shortcut_side.value == "right");
+
+        this.buttons.textContent = "";
+        for (let sc of list)
+            this.buttons.appendChild(this.make_button(sc));
+        this.wake();
+    }
+
+    make_button(sc: Shortcut): HTMLButtonElement {
+        let btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = sc.hold ? "shortcut hold" : "shortcut";
+        btn.title = sc.label;
+        btn.setAttribute("aria-label", sc.label);
+        let svg = sc.icon ? this.icons?.content.querySelector('svg[data-icon="' + sc.icon + '"]') : null;
+        if (svg) {
+            btn.appendChild(svg.cloneNode(true));
+        } else {
+            let span = document.createElement("span");
+            span.className = "shortcut_label";
+            span.textContent = sc.label;
+            btn.appendChild(span);
+        }
+        let tap = () => {
+            this.press(sc.codes);
+            this.release(sc.codes);
+        };
+        if (!sc.hold) {
+            btn.onclick = tap;
+            return btn;
+        }
+        let state = {
+            is_pressed: false,
+            release: () => {
+                if (!state.is_pressed)
+                    return;
+                state.is_pressed = false;
+                this.pressed.delete(state);
+                this.release(sc.codes);
+                btn.classList.remove("active");
+            },
+        } as { is_pressed: boolean, release: () => void };
+        btn.onpointerdown = (e) => {
+            e.preventDefault();
+            try { btn.setPointerCapture(e.pointerId); } catch { }
+            if (state.is_pressed)
+                return;
+            state.is_pressed = true;
+            this.pressed.add(state);
+            this.press(sc.codes);
+            btn.classList.add("active");
+        };
+        let up = () => {
+            if (state.is_pressed) {
+                state.release();
+                this.wake();
+            }
+        };
+        btn.onpointerup = up;
+        btn.onpointercancel = up;
+        btn.onlostpointercapture = up;
+        // keyboard activation (detail == 0) is a tap; a real pointer click already did its work above
+        btn.onclick = (e) => {
+            if (e.detail == 0)
+                tap();
+        };
+        return btn;
+    }
+
+    wake() {
+        this.bar.classList.remove("collapsed");
+        window.clearTimeout(this.timer);
+        this.timer = window.setTimeout(() => this.collapse(), SHORTCUT_BAR_IDLE_MS);
+    }
+
+    collapse() {
+        if (this.held.size > 0) {
+            this.timer = window.setTimeout(() => this.collapse(), SHORTCUT_BAR_IDLE_MS);
+            return;
+        }
+        this.bar.classList.add("collapsed");
     }
 }
 

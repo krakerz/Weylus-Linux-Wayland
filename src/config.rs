@@ -28,6 +28,12 @@ pub struct Config {
     #[arg(long, default_value = "1701", help = "Web port")]
     pub web_port: u16,
     #[arg(
+        long,
+        help = "Serve the web page and websocket over HTTPS/WSS with a self-signed certificate (stored next to weylus.toml)."
+    )]
+    #[serde(default)]
+    pub https: bool,
+    #[arg(
         long = "no-vaapi",
         action = clap::ArgAction::SetFalse,
         help = "Don't use hardware encoding through the Video Acceleration API."
@@ -105,6 +111,13 @@ pub struct Config {
     #[arg(long, help = "Print shell completions for given shell.")]
     #[serde(skip)]
     pub completions: Option<clap_complete::Shell>,
+}
+
+impl Config {
+    /// URL scheme the tablet uses to reach the server.
+    pub fn scheme(&self) -> &'static str {
+        if self.https { "https" } else { "http" }
+    }
 }
 
 fn default_true() -> bool {
@@ -359,5 +372,32 @@ mod tests {
         let mut config: Config = toml::from_str(&toml).unwrap();
         config.update_from(["weylus", "--no-gui"]);
         assert_eq!(config.allowed_clients, ["192.168.1.5"]);
+    }
+
+    #[test]
+    fn https_defaults_to_off() {
+        let config = Config::try_parse_from(["weylus"]).unwrap();
+        assert!(!config.https);
+        assert_eq!(config.scheme(), "http");
+    }
+
+    #[test]
+    fn https_flag_turns_it_on() {
+        let config = Config::try_parse_from(["weylus", "--https"]).unwrap();
+        assert!(config.https);
+        assert_eq!(config.scheme(), "https");
+    }
+
+    #[test]
+    fn https_is_read_from_config_file() {
+        let base = toml_without_vaapi_and_wayland()
+            .lines()
+            .filter(|line| !line.starts_with("https"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let config: Config = toml::from_str(&format!("https = true\n{base}")).unwrap();
+        assert!(config.https);
+        let config: Config = toml::from_str(&base).unwrap();
+        assert!(!config.https);
     }
 }

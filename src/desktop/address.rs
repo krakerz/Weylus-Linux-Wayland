@@ -24,13 +24,14 @@ pub fn tablet_addresses(bind: SocketAddr) -> Vec<SocketAddr> {
         .collect()
 }
 
-pub fn tablet_url(addr: SocketAddr, access_code: Option<&str>) -> String {
+/// `scheme` is `Config::scheme()`.
+pub fn tablet_url(scheme: &str, addr: SocketAddr, access_code: Option<&str>) -> String {
     match access_code {
         Some(code) => format!(
-            "http://{addr}?access_code={}",
+            "{scheme}://{addr}?access_code={}",
             utf8_percent_encode(code, NON_ALPHANUMERIC)
         ),
-        None => format!("http://{addr}"),
+        None => format!("{scheme}://{addr}"),
     }
 }
 
@@ -63,10 +64,11 @@ mod tests {
     fn url_encodes_the_access_code() {
         let addr: SocketAddr = "192.168.1.5:1701".parse().unwrap();
         assert_eq!(
-            tablet_url(addr, Some("a b&")),
+            tablet_url("http", addr, Some("a b&")),
             "http://192.168.1.5:1701?access_code=a%20b%26"
         );
-        assert_eq!(tablet_url(addr, None), "http://192.168.1.5:1701");
+        assert_eq!(tablet_url("http", addr, None), "http://192.168.1.5:1701");
+        assert_eq!(tablet_url("https", addr, None), "https://192.168.1.5:1701");
     }
 
     #[test]

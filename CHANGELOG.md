@@ -9,11 +9,14 @@
 - "Remember shared screen" setting in the desktop window
 - Tray icon with show, start/stop and quit; closing the window keeps Weylus in the tray (can be turned off)
 - Copy button for the tablet address
+- Shortcut bar on the tablet for drawing apps (undo, redo, eraser, brush size, hold-to-pan and more) with Krita, GIMP, Xournal++ and generic presets plus custom buttons
+- Stats overlay on the tablet: frame rate, decode time, estimated end-to-end latency, dropped frames, bitrate and codec
 - Allowed clients setting (`--allowed-clients`): only the listed IP addresses or ranges can connect; this computer always can
 - Optional prompt in the desktop window before a new device connects: allow this session, always allow, or deny
 - Connected devices list in the desktop window with codec, resolution and frame rate, and Disconnect and Block buttons
 - Source code link in the tablet page and the desktop window
 - Release packages include the licences of bundled third-party code
+- Optional HTTPS mode (`--https` or the desktop setting) with a self-signed certificate, so tablet browsers treat the page as secure; plain HTTP stays the default
 
 ### Changed
 - The desktop window needs WebKitGTK 4.1 (`webkit2gtk-4.1`) instead of FLTK

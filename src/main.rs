@@ -28,6 +28,7 @@ mod desktop;
 mod input;
 mod log;
 mod protocol;
+mod tls;
 mod update;
 mod video;
 mod web;

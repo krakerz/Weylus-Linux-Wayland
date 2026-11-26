@@ -16,8 +16,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
 use crate::access::{self, AccessControl, Admission, Approval};
@@ -378,6 +379,8 @@ pub struct WebServerConfig {
     /// Shared with `Weylus`, which blocks devices through it.
     pub access: Arc<Mutex<AccessControl>>,
     pub clients: Clients,
+    /// `Some` serves HTTPS/WSS on the same port.
+    pub tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 }
 
 struct Context<'a> {
@@ -431,6 +434,7 @@ async fn run_server(
 
     sender_startup.send(WebStartUpMessage::Start).unwrap();
 
+    let tls_acceptor = context.web_config.tls.clone().map(TlsAcceptor::from);
     let context = Arc::new(context);
 
     let broadcast_shutdown = Arc::new(tokio::sync::Notify::new());
@@ -464,14 +468,13 @@ async fn run_server(
         }
         limit_unsent_bytes(&tcp);
 
-        let io = TokioIo::new(tcp);
-
         let sender_ui = sender_ui.clone();
         let broadcast_shutdown = broadcast_shutdown.clone();
         let context = context.clone();
         let num_clients = num_clients.clone();
         let semaphore_websocket_shutdown = semaphore_websocket_shutdown.clone();
         let notify_disconnect = notify_disconnect.clone();
+        let tls_acceptor = tls_acceptor.clone();
 
         tokio::task::spawn(async move {
             // before hyper reads anything, so a refused device gets neither the page nor the websocket
@@ -482,8 +485,19 @@ async fn run_server(
             if !admitted {
                 return;
             }
+            let stream: Box<dyn Io> = match tls_acceptor {
+                None => Box::new(tcp),
+                Some(acceptor) => match accept_tls(&acceptor, tcp, remote_address).await {
+                    Accepted::Tls(stream) => stream,
+                    Accepted::Plain(tcp) => {
+                        redirect_to_https(tcp, remote_address).await;
+                        return;
+                    }
+                    Accepted::Failed => return,
+                },
+            };
             let conn = http1::Builder::new().serve_connection(
-                io,
+                TokioIo::new(stream),
                 service_fn({
                     move |req| {
                         let context = context.clone();
@@ -559,6 +573,111 @@ fn limit_unsent_bytes(tcp: &tokio::net::TcpStream) {
         warn!(
             "Failed to set TCP_NOTSENT_LOWAT: {}.",
             std::io::Error::last_os_error()
+        );
+    }
+}
+
+/// The TLS and plain streams share the hyper path.
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+
+/// Limits how long a new connection may take to start a TLS handshake and finish it; also caps
+/// the plain-HTTP redirect connection.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+enum Accepted {
+    // boxed, since the TLS stream is much larger than the other variants
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
+    Plain(TcpStream),
+    Failed,
+}
+
+async fn accept_tls(acceptor: &TlsAcceptor, tcp: TcpStream, remote: SocketAddr) -> Accepted {
+    let mut first = [0u8; 1];
+    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, tcp.peek(&mut first)).await {
+        // 0x16 is a TLS handshake record
+        Ok(Ok(1)) if first[0] == 0x16 => {
+            match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                Ok(Ok(stream)) => Accepted::Tls(Box::new(stream)),
+                // browsers drop the first connection to an untrusted certificate
+                Ok(Err(err)) => {
+                    debug!("TLS handshake with {remote} failed: {err}.");
+                    Accepted::Failed
+                }
+                Err(_) => {
+                    debug!("TLS handshake with {remote} timed out.");
+                    Accepted::Failed
+                }
+            }
+        }
+        Ok(Ok(1)) => Accepted::Plain(tcp),
+        _ => Accepted::Failed,
+    }
+}
+
+async fn redirect_to_https(tcp: TcpStream, remote: SocketAddr) {
+    let conn = http1::Builder::new().serve_connection(
+        TokioIo::new(tcp),
+        service_fn(|req| async move { Ok::<_, Infallible>(response_redirect_https(&req)) }),
+    );
+    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, conn).await {
+        Ok(Ok(())) => (),
+        Ok(Err(err)) => debug!("Redirect to HTTPS for {remote} failed: {err}."),
+        Err(_) => debug!("Redirect to HTTPS for {remote} timed out."),
+    }
+}
+
+/// 307, not 301: a cached 301 would break plain HTTP after HTTPS is turned off.
+fn response_redirect_https<B>(req: &Request<B>) -> Response<Full<Bytes>> {
+    let host = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|host| host.to_str().ok());
+    let Some(host) = host else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(Full::new(Bytes::from("Missing Host header.")))
+            .expect("static response is valid");
+    };
+    let target = req
+        .uri()
+        .path_and_query()
+        .map_or("/", |path_and_query| path_and_query.as_str());
+    Response::builder()
+        .status(StatusCode::TEMPORARY_REDIRECT)
+        .header("location", format!("https://{host}{target}"))
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Full::new(Bytes::from("Weylus uses HTTPS.")))
+        .expect("redirect response is valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redirects_plain_http_to_https() {
+        let req = Request::builder()
+            .uri("/?access_code=x")
+            .header("host", "192.168.1.5:1701")
+            .body(())
+            .unwrap();
+        let res = response_redirect_https(&req);
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            res.headers()["location"],
+            "https://192.168.1.5:1701/?access_code=x"
+        );
+    }
+
+    #[test]
+    fn redirect_without_host_is_a_bad_request() {
+        let req = Request::builder().uri("/").body(()).unwrap();
+        assert_eq!(
+            response_redirect_https(&req).status(),
+            StatusCode::BAD_REQUEST
         );
     }
 }

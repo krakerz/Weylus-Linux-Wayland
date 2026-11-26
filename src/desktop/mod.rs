@@ -68,7 +68,7 @@ impl LogBuffer {
 #[derive(Serialize, Clone, Default, Debug)]
 pub(crate) struct ServerState {
     running: bool,
-    /// `http://ip:port`, without the access code.
+    /// `http(s)://ip:port`, without the access code.
     url: Option<String>,
     qr_svg: Option<String>,
     other_urls: Vec<String>,

@@ -1,5 +1,5 @@
 use std::os::raw::{c_int, c_uchar, c_void};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tracing::warn;
 
@@ -103,7 +103,18 @@ pub struct VideoEncoder {
     height_out: usize,
     write_data: WriteData,
     start_time: Instant,
+    /// `start_time` as unix ms: pts (ms since `start_time`) + this = wall clock of the frame
+    start_unix_ms: f64,
     packetizer: Packetizer,
+}
+
+/// Wall-clock time in unix milliseconds (stats overlay timestamps).
+pub fn unix_ms() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0
 }
 
 impl VideoEncoder {
@@ -123,6 +134,7 @@ impl VideoEncoder {
             height_out,
             write_data: Box::new(move |data| write_data(data)),
             start_time: Instant::now(),
+            start_unix_ms: unix_ms(),
             packetizer: Packetizer::new(Codec::H264),
         });
         let mut last_err = None;
@@ -196,6 +208,10 @@ impl VideoEncoder {
     pub fn request_keyframe(&mut self) {
         // SAFETY: the handle is valid for the lifetime of `self`.
         unsafe { request_keyframe(self.handle) }
+    }
+
+    pub fn epoch_unix_ms(&self) -> f64 {
+        self.start_unix_ms
     }
 
     pub fn codec_name(&self) -> Option<String> {

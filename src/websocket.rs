@@ -218,6 +218,12 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                         MessageInbound::RestartVideo => {
                             self.video_sender.send(VideoCommands::Restart).unwrap()
                         }
+                        MessageInbound::Ping(client_ms) => {
+                            self.send_message(MessageOutbound::Pong {
+                                client_ms,
+                                server_ms: crate::video::unix_ms(),
+                            })
+                        }
                         MessageInbound::ClientLog(msg) => info!("Client: {msg}"),
                         MessageInbound::SetCaptureCursor(c) => self.capture_cursor = c,
                         MessageInbound::RequestKeyframe => self
@@ -584,14 +590,14 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                         .check_size(width_in, height_in, width_out, height_out)
                 {
                     send_message(&mut sender, MessageOutbound::NewVideo);
-                    let mut sender = sender.clone();
+                    let mut video_sender = sender.clone();
                     let res = VideoEncoder::new(
                         width_in,
                         height_in,
                         width_out,
                         height_out,
                         move |data| {
-                            if let Err(err) = sender.send_video(data) {
+                            if let Err(err) = video_sender.send_video(data) {
                                 warn!("Failed to send video frame: {err}!");
                             }
                         },
@@ -607,6 +613,11 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                             };
                             report_video(info.clone());
                             video_info = Some(info);
+                            // same ordered channel as the video: the epoch arrives before the first frame
+                            send_message(
+                                &mut sender,
+                                MessageOutbound::VideoEpoch(r.epoch_unix_ms()),
+                            );
                             video_encoder = Some(r);
                         }
                         Err(e) => {

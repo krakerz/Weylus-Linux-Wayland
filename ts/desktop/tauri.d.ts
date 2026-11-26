@@ -4,6 +4,7 @@ interface Settings {
     ask_new_devices: boolean;
     bind_address: string;
     web_port: number;
+    https: boolean;
     auto_start: boolean;
     wayland_support: boolean;
     remember_screen: boolean;

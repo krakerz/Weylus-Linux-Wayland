@@ -25,6 +25,7 @@ function readSettings(): Settings {
         ask_new_devices: $<HTMLInputElement>("ask_new_devices").checked,
         bind_address: $<HTMLInputElement>("bind_address").value,
         web_port: parseInt($<HTMLInputElement>("web_port").value, 10),
+        https: $<HTMLInputElement>("https").checked,
         auto_start: $<HTMLInputElement>("auto_start").checked,
         wayland_support: $<HTMLInputElement>("wayland_support").checked,
         remember_screen: $<HTMLInputElement>("remember_screen").checked,
@@ -41,6 +42,7 @@ function showSettings(s: Settings) {
     $<HTMLInputElement>("ask_new_devices").checked = s.ask_new_devices;
     $<HTMLInputElement>("bind_address").value = s.bind_address;
     $<HTMLInputElement>("web_port").value = String(s.web_port);
+    $<HTMLInputElement>("https").checked = s.https;
     $<HTMLInputElement>("auto_start").checked = s.auto_start;
     $<HTMLInputElement>("wayland_support").checked = s.wayland_support;
     $<HTMLInputElement>("remember_screen").checked = s.remember_screen;

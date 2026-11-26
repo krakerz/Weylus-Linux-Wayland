@@ -24,6 +24,7 @@ pub(crate) struct Settings {
     ask_new_devices: bool,
     bind_address: String,
     web_port: u16,
+    https: bool,
     auto_start: bool,
     wayland_support: bool,
     remember_screen: bool,
@@ -47,6 +48,7 @@ pub(crate) async fn settings(app: AppHandle) -> Result<Settings, String> {
         ask_new_devices: config.ask_new_devices,
         bind_address: config.bind_address.to_string(),
         web_port: config.web_port,
+        https: config.https,
         auto_start: config.auto_start,
         wayland_support: config.wayland_support,
         remember_screen: config.remember_screen,
@@ -79,6 +81,7 @@ pub(crate) fn start(app: &AppHandle, settings: Option<Settings>) -> Result<Serve
         config.allowed_clients = allowed;
         config.ask_new_devices = settings.ask_new_devices;
         config.web_port = settings.web_port;
+        config.https = settings.https;
         config.auto_start = settings.auto_start;
         config.wayland_support = settings.wayland_support;
         config.remember_screen = settings.remember_screen;
@@ -155,23 +158,28 @@ fn on_web_message(app: &AppHandle, msg: Web2UiMessage) {
 fn server_state_for(config: &crate::config::Config) -> ServerState {
     let addrs = address::tablet_addresses(SocketAddr::new(config.bind_address, config.web_port));
     let primary = addrs[0];
+    let scheme = config.scheme();
     if addrs.len() > 1 {
         info!("Found more than one IP address for browsers to connect to,");
         info!("other urls are:");
         for addr in &addrs[1..] {
-            info!("http://{addr}");
+            info!("{scheme}://{addr}");
         }
     }
-    let qr_svg = address::qr_svg(&address::tablet_url(primary, config.access_code.as_deref()))
-        .map_err(|err| warn!("Couldn't render the QR code: {err}"))
-        .ok();
+    let qr_svg = address::qr_svg(&address::tablet_url(
+        scheme,
+        primary,
+        config.access_code.as_deref(),
+    ))
+    .map_err(|err| warn!("Couldn't render the QR code: {err}"))
+    .ok();
     ServerState {
         running: true,
-        url: Some(format!("http://{primary}")),
+        url: Some(format!("{scheme}://{primary}")),
         qr_svg,
         other_urls: addrs[1..]
             .iter()
-            .map(|addr| format!("http://{addr}"))
+            .map(|addr| format!("{scheme}://{addr}"))
             .collect(),
     }
 }

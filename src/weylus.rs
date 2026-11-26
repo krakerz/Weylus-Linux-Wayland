@@ -50,6 +50,17 @@ impl Weylus {
             Prompt::Never
         };
         let access = Arc::new(Mutex::new(AccessControl::new(allow_list, prompt)));
+        let tls = if config.https {
+            match crate::tls::server_config(config.bind_address) {
+                Ok(tls) => Some(tls),
+                Err(err) => {
+                    error!("Couldn't set up HTTPS: {err:#}.");
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
 
         let (sender_ui, mut receiver_ui) = tokio::sync::mpsc::channel(100);
         let clients = {
@@ -74,6 +85,7 @@ impl Weylus {
                 enable_custom_input_areas: config.wayland_support,
                 access: access.clone(),
                 clients: clients.clone(),
+                tls,
             },
             WeylusClientConfig {
                 encoder_options,
