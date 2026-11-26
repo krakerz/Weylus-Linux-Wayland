@@ -3,7 +3,7 @@
 Weylus turns your tablet into a graphic tablet, touch screen and mouse for your Linux desktop.
 
 This is a fork of [H-M-H/Weylus](https://github.com/H-M-H/Weylus), maintained at
-[krakerz/Weylus](https://github.com/krakerz/Weylus). It supports Wayland only.
+[krakerz/Weylus-Linux-Wayland](https://github.com/krakerz/Weylus-Linux-Wayland). It supports Wayland only.
 
 ## Table of Contents
 * [Description](#description)
@@ -116,7 +116,7 @@ distribution's default FFmpeg usually lacks the H.264 encoders Weylus needs. Thi
 required, but was not checked on these distributions.
 
 ## Installation
-Download a release from the [releases page](https://github.com/krakerz/Weylus/releases) (x86_64; Ubuntu
+Download a release from the [releases page](https://github.com/krakerz/Weylus-Linux-Wayland/releases) (x86_64; Ubuntu
 24.04, Debian 13 or newer, current Fedora, Arch and openSUSE):
 - `Weylus-<version>-x86_64.AppImage`: make it executable (`chmod +x`) and run it.
 - `weylus-v<version>-linux-x86_64.tar.gz`: unpack it and run `./install.sh` (installs to `~/.local`;
@@ -184,6 +184,13 @@ runs on the same port (`/ws`). With `ufw`:
 sudo ufw allow 1701/tcp
 ```
 
+### Updates
+The AppImage and the `install.sh` build check for a new release at start-up and show it at the
+bottom of the window: **Update** downloads and verifies it, **Restart** starts the new version. Turn
+the check off with *Check at startup* or `--no-check-updates`; *Check now* checks on demand. Without
+the GUI, Weylus only logs that a new release exists. Builds from source and distribution packages
+update through their own channel.
+
 ### Command line options
 Run `weylus --help` for the full list. The important options:
 
@@ -198,6 +205,7 @@ Run `weylus --help` for the full list. The important options:
 | `--no-vaapi` | Do not use VA-API hardware encoding (on by default; falls back to software) |
 | `--try-nvenc` | Try NVIDIA's NVENC for GPU encoding |
 | `--no-remember-screen` | Ask for the screen on every connection instead of remembering it until restart |
+| `--no-check-updates` | Don't check for a newer release at start-up |
 | `--gui-theme <THEME>` | Theme of the GUI |
 | `--completions <SHELL>` | Print shell completions for bash, elvish, fish, powershell or zsh |
 

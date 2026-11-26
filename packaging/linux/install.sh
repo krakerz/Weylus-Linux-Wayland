@@ -17,15 +17,17 @@ done
 bin="$prefix/bin/weylus"
 desktop="$prefix/share/applications/weylus.desktop"
 icon="$prefix/share/icons/hicolor/scalable/apps/weylus.svg"
+# Weylus only offers in-app updates when this file sits next to its install.
+marker="$prefix/share/weylus/installed-with"
 
 if [ "$uninstall" = 1 ]; then
-    rm -f "$bin" "$desktop" "$icon"
+    rm -f "$bin" "$desktop" "$icon" "$marker"
+    rmdir "$(dirname "$marker")" 2>/dev/null || true
     echo "Removed Weylus from $prefix (your Weylus settings are kept)."
     exit 0
 fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
-install -Dm755 "$here/weylus" "$bin"
 install -Dm644 "$here/weylus.svg" "$icon"
 mkdir -p "$(dirname "$desktop")"
 # Absolute path: ~/.local/bin is not on every desktop session's PATH.
@@ -33,6 +35,13 @@ sed -e "s|^Exec=.*|Exec=$bin|" -e "s|^TryExec=.*|TryExec=$bin|" "$here/weylus.de
 if command -v update-desktop-database >/dev/null; then
     update-desktop-database -q "$(dirname "$desktop")" || true
 fi
+mkdir -p "$(dirname "$marker")"
+echo install.sh >"$marker"
+# Copy, then rename: a running Weylus (an in-app update) keeps its old file and writing over a
+# running binary fails with "text file busy".
+mkdir -p "$prefix/bin"
+install -m755 "$here/weylus" "$prefix/bin/.weylus.new"
+mv -f "$prefix/bin/.weylus.new" "$bin"
 echo "Installed Weylus to $bin"
 case ":$PATH:" in
 *":$prefix/bin:"*) ;;

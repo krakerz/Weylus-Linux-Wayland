@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicBool;
 
 use fltk::app;
-use fltk::enums::{FrameType, LabelType};
+use fltk::enums::{Align, FrameType, LabelType};
 use fltk::image::PngImage;
 use fltk::menu::Choice;
 use std::sync::{Arc, Mutex, mpsc};
@@ -16,6 +16,7 @@ use fltk::{
     button::{Button, CheckButton},
     frame::Frame,
     input::{Input, IntInput},
+    misc::Progress,
     output::Output,
     prelude::*,
     text::{TextBuffer, TextDisplay},
@@ -26,7 +27,95 @@ use pnet_datalink as datalink;
 
 use crate::config::{Config, ThemeType, write_config};
 use crate::protocol::{CustomInputAreas, Rect};
+use crate::update::{self, CheckMode, Status, Updater};
 use crate::web::Web2UiMessage::UInputInaccessible;
+
+fn version_line() -> String {
+    format!(
+        "Version {} · {}",
+        update::current_version(),
+        update::install_kind().describe()
+    )
+}
+
+/// The update widgets, redrawn from the updater's status by a timer on the fltk thread.
+struct UpdateRow {
+    status: Frame,
+    progress: Progress,
+    button: Button,
+    check_now: Button,
+    blocked: bool,
+    last: Option<Status>,
+}
+
+impl UpdateRow {
+    fn render(&mut self, updater: &Updater) {
+        let status = updater.status();
+        let downloading = matches!(status, Status::Downloading { .. });
+        if !downloading && self.last.as_ref() == Some(&status) {
+            return;
+        }
+        let mut tooltip = String::new();
+        let mut button = None;
+        let text = match &status {
+            Status::Idle => version_line(),
+            Status::Checking => "Checking…".to_string(),
+            Status::UpToDate => format!("Weylus {} is up to date", update::current_version()),
+            Status::Available(update) => {
+                button = Some("Update");
+                format!("Weylus {} is available", update.version)
+            }
+            Status::Downloading { version } => {
+                format!("Downloading {version} — {}", updater.progress().describe())
+            }
+            Status::Installed { version } => {
+                button = Some("Restart");
+                format!("Updated to {version}")
+            }
+            Status::CheckFailed(error) => {
+                tooltip = error.clone();
+                format!("Couldn't check: {error}")
+            }
+            Status::UpdateFailed { error, .. } => {
+                button = Some("Retry");
+                tooltip = error.clone();
+                format!("Update failed: {error}")
+            }
+        };
+        let text = if text.chars().count() > 45 {
+            format!("{}…", text.chars().take(44).collect::<String>())
+        } else {
+            text
+        };
+        if downloading {
+            self.progress
+                .set_value(f64::from(updater.progress().fraction().unwrap_or(0.0)));
+            self.progress.set_label(&text);
+            self.status.hide();
+            self.progress.show();
+        } else {
+            self.progress.hide();
+            self.status.set_label(&text);
+            self.status.set_tooltip(&tooltip);
+            self.status.show();
+        }
+        match button {
+            Some(label) => {
+                self.button.set_label(label);
+                self.button.show();
+            }
+            None => self.button.hide(),
+        }
+        let busy = matches!(status, Status::Checking | Status::Downloading { .. });
+        if busy || self.blocked {
+            self.check_now.deactivate();
+        } else {
+            self.check_now.activate();
+        }
+        self.last = Some(status);
+        app::redraw();
+    }
+}
 
 pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     let width = 200;
@@ -38,7 +127,7 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
         th.apply()
     }
     let mut wind = Window::default()
-        .with_size(660, 600)
+        .with_size(660, 650)
         .center_screen()
         .with_label(&format!("Weylus - {}", env!("CARGO_PKG_VERSION")));
     wind.set_xclass("weylus");
@@ -145,6 +234,42 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
 
     qr_frame.hide();
 
+    let update_blocker = update::install_kind().update_blocker();
+    let row_y = output.y() + output.height() + padding;
+    let mut update_status = Frame::default()
+        .with_size(270, height)
+        .with_pos(30, row_y)
+        .with_label(&version_line());
+    update_status.set_align(Align::Left | Align::Inside);
+    if let Some(reason) = &update_blocker {
+        update_status.set_tooltip(reason);
+    }
+    let mut update_progress = Progress::default()
+        .with_size(270, height)
+        .with_pos(30, row_y);
+    update_progress.set_minimum(0.0);
+    update_progress.set_maximum(1.0);
+    update_progress.hide();
+    let mut but_update = Button::default()
+        .with_size(80, height)
+        .right_of(&update_status, padding)
+        .with_label("Update");
+    but_update.hide();
+    let mut but_check_now = Button::default()
+        .with_size(100, height)
+        .right_of(&but_update, padding)
+        .with_label("Check now");
+    let mut check_updates = CheckButton::default()
+        .with_size(120, height)
+        .right_of(&but_check_now, padding)
+        .with_label("Check at startup");
+    check_updates.set_checked(config.check_updates);
+    check_updates.set_tooltip("Look for a newer Weylus release when Weylus starts.");
+    if update_blocker.is_some() {
+        but_check_now.deactivate();
+        check_updates.deactivate();
+    }
+
     wind.make_resizable(true);
     wind.end();
     wind.show();
@@ -162,6 +287,47 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     let mut is_server_running = false;
     let auto_start = config.auto_start;
     let config = Arc::new(Mutex::new(config.clone()));
+
+    let updater = Updater::new();
+    {
+        let config = config.clone();
+        check_updates.set_callback(move |cb| {
+            config.lock().unwrap().check_updates = cb.is_checked();
+            write_config(&config.lock().unwrap());
+        });
+    }
+    {
+        let updater = updater.clone();
+        but_check_now.set_callback(move |_| updater.check_in_background(CheckMode::Manual));
+    }
+    {
+        let updater = updater.clone();
+        but_update.set_callback(move |_| match updater.status() {
+            Status::Available(_) | Status::UpdateFailed { .. } => updater.apply_in_background(),
+            Status::Installed { .. } => {
+                update::request_relaunch();
+                app.quit();
+            }
+            _ => {}
+        });
+    }
+    if config.lock().unwrap().check_updates {
+        updater.check_in_background(CheckMode::Quiet);
+    }
+    {
+        let mut row = UpdateRow {
+            status: update_status,
+            progress: update_progress,
+            button: but_update,
+            check_now: but_check_now,
+            blocked: update_blocker.is_some(),
+            last: None,
+        };
+        app::add_timeout3(0.15, move |handle| {
+            row.render(&updater);
+            app::repeat_timeout3(0.15, handle);
+        });
+    }
 
     {
         let config = config.clone();

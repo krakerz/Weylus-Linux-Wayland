@@ -26,6 +26,7 @@ mod gui;
 mod input;
 mod log;
 mod protocol;
+mod update;
 mod video;
 mod web;
 mod websocket;
@@ -65,6 +66,14 @@ fn main() {
         return;
     }
 
+    // Detect before an update can replace the binary: afterwards /proc/self/exe reads "(deleted)".
+    let install_kind = update::install_kind();
+    info!(
+        "Weylus {} ({})",
+        update::current_version(),
+        install_kind.describe()
+    );
+
     {
         if let Err(err) = gstreamer::init() {
             error!(
@@ -76,6 +85,16 @@ fn main() {
     }
 
     if conf.no_gui {
+        if conf.check_updates && install_kind.update_blocker().is_none() {
+            std::thread::spawn(|| match update::check() {
+                Ok(Some(update)) => info!(
+                    "Weylus {} is available: https://github.com/krakerz/Weylus-Linux-Wayland/releases/latest",
+                    update.version
+                ),
+                Ok(None) => {}
+                Err(err) => tracing::debug!("Update check failed: {err:#}"),
+            });
+        }
         let mut weylus = crate::weylus::Weylus::new();
         weylus.start(&conf, |msg| match msg {
             web::Web2UiMessage::UInputInaccessible => {
@@ -102,6 +121,7 @@ fn main() {
         }
     } else {
         gui::run(&conf, receiver);
+        update::spawn_pending_relaunch();
     }
 }
 

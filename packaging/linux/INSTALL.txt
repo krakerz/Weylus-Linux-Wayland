@@ -95,4 +95,4 @@ Weylus source. Weylus is AGPL-3.0 (LICENSE); the icon is from Lucide
 (LUCIDE-LICENSE).
 
 
-https://github.com/krakerz/Weylus
+https://github.com/krakerz/Weylus-Linux-Wayland

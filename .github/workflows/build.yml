@@ -108,6 +108,24 @@ jobs:
         with:
           name: weylus-linux
           path: dist
+      # The in-app updater refuses unsigned assets, so an unsigned draft must never exist.
+      - name: Sign release assets
+        if: steps.gate.outputs.released == 'false'
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          test -n "$RELEASE_SIGNING_KEY" || { echo "RELEASE_SIGNING_KEY secret is not set"; exit 1; }
+          key="$RUNNER_TEMP/release-signing.pem"
+          ( umask 077; printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key" )
+          # The raw public key must match the one embedded in the app (src/update.rs).
+          test "$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | base64)" = "KkXTzMlmy7DzEfWOW7VYVXA2J3ewMOaRxGlSgq8KjMY=" \
+            || { echo "RELEASE_SIGNING_KEY does not match the public key embedded in the app"; rm -f "$key"; exit 1; }
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/release-signing.pub"
+          for asset in dist/*.tar.gz dist/*.AppImage; do
+            openssl pkeyutl -sign -inkey "$key" -rawin -in "$asset" -out "$asset.sig"
+            openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/release-signing.pub" -rawin -in "$asset" -sigfile "$asset.sig"
+          done
+          rm -f "$key"
       - name: Draft release
         if: steps.gate.outputs.released == 'false'
         uses: softprops/action-gh-release@v2
@@ -119,3 +137,4 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.AppImage
+            dist/*.sig

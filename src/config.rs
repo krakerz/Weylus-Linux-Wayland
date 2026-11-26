@@ -105,6 +105,14 @@ pub struct Config {
     #[serde(default = "default_true", rename = "remember_screen")]
     pub remember_screen: bool,
 
+    #[arg(
+        long = "no-check-updates",
+        action = clap::ArgAction::SetFalse,
+        help = "Don't check for a newer Weylus release at start-up."
+    )]
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+
     #[arg(long, help = "Print template of index.html served by Weylus.")]
     #[serde(skip)]
     pub print_index_html: bool,
@@ -247,6 +255,30 @@ mod tests {
         // a file written before the option existed keeps the default
         let config: Config = toml::from_str(&toml.replace("remember_screen = true", "")).unwrap();
         assert!(config.remember_screen);
+    }
+
+    #[test]
+    fn check_updates_defaults_to_on() {
+        let config = Config::try_parse_from(["weylus"]).unwrap();
+        assert!(config.check_updates);
+    }
+
+    #[test]
+    fn no_check_updates_flag_turns_it_off() {
+        let config = Config::try_parse_from(["weylus", "--no-check-updates"]).unwrap();
+        assert!(!config.check_updates);
+    }
+
+    #[test]
+    fn check_updates_is_read_from_config_file() {
+        let toml = toml_without_vaapi_and_wayland();
+        assert!(toml.contains("check_updates = true"));
+        let config: Config =
+            toml::from_str(&toml.replace("check_updates = true", "check_updates = false")).unwrap();
+        assert!(!config.check_updates);
+        // a file written before the option existed keeps the default
+        let config: Config = toml::from_str(&toml.replace("check_updates = true", "")).unwrap();
+        assert!(config.check_updates);
     }
 
     #[test]

@@ -12,6 +12,7 @@
 - A chosen codec the device can't decode switches to Auto automatically
 - The screen share is remembered until Weylus restarts, so reloading the page no longer asks for the screen again (`--no-remember-screen` turns this off)
 - Prebuilt Linux downloads on the releases page: an AppImage and a tar.gz with an install script, both with FFmpeg included
+- In-app updates for the AppImage and the install.sh build: Weylus checks for a new release at start-up (`--no-check-updates` turns this off) and installs it with one click
 
 ### Changed
 - Weylus builds against the system's FFmpeg and libva instead of bundled copies
