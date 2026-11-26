@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [ master, dev ]
+    branches: [ master ]
     paths-ignore: [ Readme.md, CHANGELOG.md, LICENSE, CONTRIBUTORS, In_action.gif, .gitignore ]
   pull_request:
     branches: [ master ]
@@ -47,6 +47,8 @@ jobs:
         run: bash ci/floor-ubuntu-24.04.sh
 
   package:
+    # PRs get the checks only; packaging runs for master pushes and manual runs.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # Oldest supported distro: the assets need glibc 2.39 or newer.
     container: ubuntu:24.04
