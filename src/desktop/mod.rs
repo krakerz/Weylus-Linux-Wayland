@@ -13,6 +13,7 @@ use crate::web::ApprovalRequest;
 use crate::weylus::Weylus;
 
 mod address;
+mod autostart;
 mod commands;
 mod input_areas;
 mod tray;
@@ -189,6 +190,8 @@ pub fn run(config: Config, log_receiver: mpsc::Receiver<String>) {
             commands::update_restart,
             commands::set_check_updates,
             commands::set_close_to_tray,
+            commands::autostart_enabled,
+            commands::set_autostart,
             commands::submit_input_areas,
             commands::cancel_input_areas,
             commands::answer_approval,
@@ -247,14 +250,19 @@ fn setup(app: &tauri::AppHandle, log_receiver: mpsc::Receiver<String>) {
     });
 
     let desktop = app.state::<Desktop>();
-    let (check_updates, auto_start) = {
+    let (check_updates, auto_start, hidden) = {
         let config = desktop.config.lock().expect("lock poisoned");
-        (config.check_updates, config.auto_start)
+        (config.check_updates, config.auto_start, config.hidden)
     };
+    // The window starts invisible (tauri.conf.json); without a tray a hidden one is unreachable.
+    if !hidden || desktop.tray.get().is_none() {
+        tray::show_window(app);
+    }
+    autostart::refresh();
     if check_updates {
         desktop.updater.check_in_background(CheckMode::Quiet);
     }
-    if auto_start {
+    if auto_start || hidden {
         let app = app.clone();
         // Weylus::start blocks on the web thread's start-up message.
         tauri::async_runtime::spawn_blocking(move || {

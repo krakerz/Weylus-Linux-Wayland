@@ -385,14 +385,16 @@ async function init() {
         }),
     ]);
 
-    const [settings, server, view, logs, clients] = await Promise.all([
+    const [settings, server, view, logs, clients, autostart] = await Promise.all([
         invoke<Settings>("settings"),
         invoke<ServerState>("server_state"),
         invoke<UpdateView>("update_state"),
         invoke<LogLine[]>("logs"),
         invoke<ClientInfo[] | null>("clients"),
+        invoke<boolean>("autostart_enabled"),
     ]);
     showSettings(settings);
+    $<HTMLInputElement>("start_with_session").checked = autostart;
     if (settings.allowed_clients !== "") validateAllowedClients();
     renderServer(server);
     renderUpdate(view);
@@ -417,6 +419,15 @@ $("close_to_tray").addEventListener("change", (e) => {
     invoke("set_close_to_tray", {
         enabled: (e.target as HTMLInputElement).checked,
     }).catch(console.error);
+});
+$("start_with_session").addEventListener("change", (e) => {
+    const box = e.target as HTMLInputElement;
+    invoke("set_autostart", { enabled: box.checked })
+        .then(() => showSettingsError(null))
+        .catch((err) => {
+            box.checked = !box.checked;
+            showSettingsError(errorText(err));
+        });
 });
 $("allowed_clients").addEventListener("input", () => {
     window.clearTimeout(allowedClientsTimer);

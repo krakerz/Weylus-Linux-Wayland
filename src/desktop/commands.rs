@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{info, warn};
 
-use super::{Desktop, LogLine, ServerState, UpdateView, address, input_areas, tray, update_view};
+use super::{
+    Desktop, LogLine, ServerState, UpdateView, address, autostart, input_areas, tray, update_view,
+};
 use crate::access::{self, AllowList, Approval};
 use crate::clients::ClientInfo;
 use crate::config::write_config;
@@ -297,6 +299,21 @@ pub(crate) fn set_close_to_tray(state: tauri::State<'_, Desktop>, enabled: bool)
     let mut config = state.config.lock().expect("lock poisoned");
     config.close_to_tray = enabled;
     write_config(&config);
+}
+
+#[tauri::command]
+pub(crate) fn autostart_enabled() -> bool {
+    autostart::is_enabled()
+}
+
+#[tauri::command]
+pub(crate) fn set_autostart(enabled: bool) -> Result<(), String> {
+    let result = if enabled {
+        autostart::enable()
+    } else {
+        autostart::disable()
+    };
+    result.map_err(|err| format!("{err:#}"))
 }
 
 #[tauri::command]

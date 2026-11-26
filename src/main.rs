@@ -154,7 +154,7 @@ mod tests {
     #[bench]
     fn bench_capture_wayland(b: &mut Bencher) {
         gstreamer::init().unwrap();
-        let root = capturable::pipewire::get_capturables(false)
+        let root = capturable::pipewire::get_capturables(false, capturable::ScreenRestore::Off)
             .unwrap()
             .remove(0);
         let mut r = root.recorder(false).unwrap();
@@ -168,7 +168,7 @@ mod tests {
     #[bench]
     fn bench_video_wayland(b: &mut Bencher) {
         gstreamer::init().unwrap();
-        let root = capturable::pipewire::get_capturables(false)
+        let root = capturable::pipewire::get_capturables(false, capturable::ScreenRestore::Off)
             .unwrap()
             .remove(0);
         let mut r = root.recorder(false).unwrap();

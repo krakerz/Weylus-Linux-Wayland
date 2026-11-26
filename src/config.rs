@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::{fs, path::PathBuf};
+use std::{ffi::OsString, fs, path::PathBuf};
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,12 @@ pub struct Config {
     #[serde(default)]
     pub no_gui: bool,
     #[arg(
+        long,
+        help = "Start hidden in the system tray and start the server (used by the session autostart entry)."
+    )]
+    #[serde(skip)]
+    pub hidden: bool,
+    #[arg(
         long = "no-wayland",
         action = clap::ArgAction::SetFalse,
         help = "Don't capture the screen through xdg-desktop-portal/PipeWire (Wayland)."
@@ -59,7 +65,7 @@ pub struct Config {
     #[arg(
         long = "no-remember-screen",
         action = clap::ArgAction::SetFalse,
-        help = "Don't remember the shared screen across page reloads; ask for it on every connection."
+        help = "Don't remember the shared screen across page reloads and restarts; ask for it on every connection."
     )]
     #[serde(default = "default_true", rename = "remember_screen")]
     pub remember_screen: bool,
@@ -176,15 +182,25 @@ pub fn write_config(conf: &Config) {
 }
 
 pub fn get_config() -> Config {
-    let args = std::env::args();
-    if let Some(mut config) = read_config() {
-        if args.len() > 1 {
-            config.update_from(args);
+    merge_args(read_config(), std::env::args_os().collect())
+}
+
+/// `update_from` resets every flag missing from `args` to its default, so the autostart entry's
+/// lone `--hidden` must not reach it or it would wipe the stored settings.
+fn merge_args(stored: Option<Config>, args: Vec<OsString>) -> Config {
+    let hidden = args.iter().skip(1).any(|arg| arg == "--hidden");
+    let args: Vec<OsString> = args.into_iter().filter(|arg| arg != "--hidden").collect();
+    let mut config = match stored {
+        Some(mut config) => {
+            if args.len() > 1 {
+                config.update_from(args);
+            }
+            config
         }
-        config
-    } else {
-        Config::parse()
-    }
+        None => Config::parse_from(args),
+    };
+    config.hidden = hidden;
+    config
 }
 
 #[cfg(test)]
@@ -292,6 +308,58 @@ mod tests {
             .filter(|line| !line.starts_with("vaapi") && !line.starts_with("wayland"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn stored_config() -> Config {
+        let toml = toml_without_vaapi_and_wayland()
+            .lines()
+            .filter(|l| {
+                !l.starts_with("web_port")
+                    && !l.starts_with("https")
+                    && !l.starts_with("auto_start")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        toml::from_str(&format!(
+            "web_port = 1755\nhttps = true\nauto_start = false\n{toml}"
+        ))
+        .unwrap()
+    }
+
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn lone_hidden_flag_keeps_stored_settings() {
+        let config = merge_args(Some(stored_config()), argv(&["weylus", "--hidden"]));
+        assert!(config.hidden);
+        assert_eq!(config.web_port, 1755);
+        assert!(config.https);
+        assert!(!config.auto_start);
+    }
+
+    #[test]
+    fn hidden_flag_combines_with_other_flags() {
+        let config = merge_args(
+            Some(stored_config()),
+            argv(&["weylus", "--hidden", "--web-port", "1800"]),
+        );
+        assert!(config.hidden);
+        assert_eq!(config.web_port, 1800);
+    }
+
+    #[test]
+    fn hidden_is_off_without_the_flag() {
+        assert!(!merge_args(None, argv(&["weylus"])).hidden);
+        assert!(!merge_args(Some(stored_config()), argv(&["weylus"])).hidden);
+    }
+
+    #[test]
+    fn hidden_is_not_persisted() {
+        let config = merge_args(None, argv(&["weylus", "--hidden"]));
+        assert!(config.hidden);
+        assert!(!toml::to_string(&config).unwrap().contains("hidden"));
     }
 
     #[test]

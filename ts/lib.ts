@@ -368,6 +368,7 @@ class Settings {
     shortcut_preset: HTMLSelectElement;
     shortcut_side: HTMLSelectElement;
     shortcut_custom: HTMLTextAreaElement;
+    screen_pick_timer: number | undefined;
     visible: boolean;
     custom_input_areas: CustomInputAreas;
     settings: HTMLElement;
@@ -520,6 +521,7 @@ class Settings {
             // the portal decides the cursor mode per session: start a new one (the screen picker shows again)
             this.webSocket.send(JSON.stringify({ "SetCaptureCursor": this.checks.get("capture_cursor").checked }));
             this.reselect_capture = true;
+            this.await_screen_pick();
             this.webSocket.send('"RefreshCapturableList"');
         };
         this.scale_video_input.onchange = upd_server_config;
@@ -536,6 +538,7 @@ class Settings {
         document.getElementById("refresh").onclick = () => {
             // the new portal session renames its stream: reselect it so the video resumes
             this.reselect_capture = true;
+            this.await_screen_pick();
             this.webSocket.send('"RefreshCapturableList"');
         };
         document.getElementById("custom_input_areas").onclick = () => {
@@ -773,7 +776,24 @@ class Settings {
         this.visible = !this.visible;
     }
 
+    await_screen_pick() {
+        const b = document.getElementById("refresh") as HTMLButtonElement;
+        b.disabled = true;
+        b.textContent = "Pick on the PC…";
+        // a cancelled or failed pick sends no list: don't leave the button stuck
+        window.clearTimeout(this.screen_pick_timer);
+        this.screen_pick_timer = window.setTimeout(() => this.reset_screen_pick(), 60000);
+    }
+
+    reset_screen_pick() {
+        window.clearTimeout(this.screen_pick_timer);
+        const b = document.getElementById("refresh") as HTMLButtonElement;
+        b.disabled = false;
+        b.textContent = "Change screen";
+    }
+
     onCapturableList(window_names: string[]) {
+        this.reset_screen_pick();
         let current_selection = undefined;
         if (this.capturable_select.selectedOptions[0])
             current_selection = this.capturable_select.selectedOptions[0].textContent;
@@ -1585,9 +1605,11 @@ function handle_messages(
             } else if (typeof msg == "object") {
                 if ("CapturableList" in msg)
                     onCapturableList(msg["CapturableList"]);
-                else if ("Error" in msg)
+                else if ("Error" in msg) {
+                    settings?.reset_screen_pick();
                     alert(msg["Error"]);
-                else if ("ConfigError" in msg) {
+                } else if ("ConfigError" in msg) {
+                    settings?.reset_screen_pick();
                     onConfigError(msg["ConfigError"]);
                 } else if ("CustomInputAreas" in msg) {
                     settings.custom_input_areas = msg["CustomInputAreas"];

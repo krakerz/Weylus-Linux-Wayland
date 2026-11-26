@@ -6,7 +6,8 @@
 
 ### Added
 - New desktop window: settings, the tablet address with QR code, the log and updates in one view, with light and dark mode
-- "Remember shared screen" setting in the desktop window
+- "Remember shared screen" setting in the desktop window; with a portal that supports restore tokens it also lasts across restarts
+- "Start with my session" setting in the desktop window: Weylus starts hidden in the tray with the server running when you log in (`--hidden` does the same by hand)
 - Tray icon with show, start/stop and quit; closing the window keeps Weylus in the tray (can be turned off)
 - Copy button for the tablet address
 - Shortcut bar on the tablet for drawing apps (undo, redo, eraser, brush size, hold-to-pan and more) with Krita, GIMP, Xournal++ and generic presets plus custom buttons
@@ -22,6 +23,7 @@
 - The desktop window needs WebKitGTK 4.1 (`webkit2gtk-4.1`) instead of FLTK
 - Custom input areas are set as percentages of the screen in the desktop window
 - The zoom controls on the tablet fold into a small button after a few seconds; tap it to open them again
+- The tablet's "Refresh List" button is now "Change screen" and shows when to pick the screen on the computer
 
 ### Removed
 - The `--gui-theme` option and the FLTK themes

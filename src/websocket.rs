@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, trace, warn};
 
-use crate::capturable::{Capturable, Recorder, get_capturables};
+use crate::capturable::{Capturable, Recorder, ScreenRestore, get_capturables};
 use crate::input::device::InputDevice;
 use crate::protocol::{
     ClientConfiguration, KeyboardEvent, MessageInbound, MessageOutbound, PointerEvent,
@@ -309,7 +309,13 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                 if remember {
                     forget_screen();
                 }
-                let capturables = get_capturables(self.config.wayland_support, self.capture_cursor);
+                let restore = match (remember, refresh) {
+                    (false, _) => ScreenRestore::Off,
+                    (true, false) => ScreenRestore::Restore,
+                    (true, true) => ScreenRestore::Replace,
+                };
+                let capturables =
+                    get_capturables(self.config.wayland_support, self.capture_cursor, restore);
                 // an empty list is a failed session, don't keep it
                 // every portal session gets its own generation: a refreshed session can reuse
                 // the stream's node id, so the name alone doesn't tell the sources apart
