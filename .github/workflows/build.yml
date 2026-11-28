@@ -23,7 +23,7 @@ jobs:
           pacman -Syu --noconfirm --needed
           base-devel git rust ffmpeg libva dbus gstreamer gst-plugins-base-libs
           wayland wayland-protocols libxkbcommon webkit2gtk-4.1 nodejs npm
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: pr-check
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and test against Ubuntu 24.04 packages with the MSRV toolchain
         run: bash ci/floor-ubuntu-24.04.sh
 
@@ -51,7 +51,7 @@ jobs:
     # Oldest supported distro: the assets need glibc 2.39 or newer.
     container: ubuntu:24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install build dependencies
         run: |
           bash ci/package-linux.sh deps
@@ -61,13 +61,13 @@ jobs:
         # Same version as CARGO_ABOUT_VERSION in ci/package-linux.sh; rust-cache keeps ~/.cargo/bin.
         run: cargo about --version 2>/dev/null | grep -q " 0.9.3$" || cargo install --locked --features cli cargo-about@0.9.3
       - name: Cache static FFmpeg
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /opt/weylus-ffmpeg
           key: ffmpeg-ubuntu2404-${{ hashFiles('ci/build-ffmpeg.sh') }}
       - name: Build tar.gz and AppImage
         run: bash ci/package-linux.sh build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: weylus-linux
           path: dist/
@@ -80,7 +80,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Resolve version
         id: version
@@ -107,7 +107,7 @@ jobs:
             echo "---"
             echo "[Full changelog](${{ github.server_url }}/${{ github.repository }}/blob/master/CHANGELOG.md)"
           } >> release-notes.md
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: weylus-linux
           path: dist
@@ -131,7 +131,7 @@ jobs:
           rm -f "$key"
       - name: Draft release
         if: steps.gate.outputs.released == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           tag_name: ${{ steps.version.outputs.version }}
