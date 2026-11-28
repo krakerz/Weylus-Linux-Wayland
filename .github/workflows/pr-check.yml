@@ -22,7 +22,7 @@ jobs:
           pacman -Syu --noconfirm --needed
           base-devel git rust ffmpeg libva dbus gstreamer gst-plugins-base-libs
           wayland wayland-protocols libxkbcommon webkit2gtk-4.1 nodejs npm
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: pr-check
@@ -40,6 +40,6 @@ jobs:
     runs-on: ubuntu-24.04 # pinned 2026-11; move when GitHub retires the image
     container: ubuntu:24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and test against Ubuntu 24.04 packages with the MSRV toolchain
         run: bash ci/floor-ubuntu-24.04.sh
