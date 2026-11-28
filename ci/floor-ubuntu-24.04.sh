@@ -20,5 +20,5 @@ pkg-config --modversion libavcodec libavfilter libavutil libva gstreamer-1.0 web
 rustc --version
 
 npm ci
-cargo build --locked
-cargo test --locked -- --nocapture  # show hardware-test SKIPPED lines
+cargo build --release --locked
+cargo test --release --locked -- --nocapture  # show hardware-test SKIPPED lines

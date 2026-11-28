@@ -4,9 +4,6 @@ on:
   push:
     branches: [ master ]
     paths-ignore: [ Readme.md, CHANGELOG.md, LICENSE, CONTRIBUTORS, In_action.gif, .gitignore ]
-  pull_request:
-    branches: [ master ]
-    paths-ignore: [ Readme.md, CHANGELOG.md, LICENSE, CONTRIBUTORS, In_action.gif, .gitignore ]
   workflow_dispatch:
 
 permissions:
@@ -28,14 +25,18 @@ jobs:
           wayland wayland-protocols libxkbcommon webkit2gtk-4.1 nodejs npm
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr-check
       - name: Install web dependencies
         run: npm ci
       - name: Check formatting
         run: cargo fmt -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --release --locked
       - name: Test
-        run: cargo test -- --nocapture
+        run: cargo test --release --locked -- --nocapture
 
   floor-ubuntu-2404:
     runs-on: ubuntu-latest
@@ -46,8 +47,6 @@ jobs:
         run: bash ci/floor-ubuntu-24.04.sh
 
   package:
-    # PRs get the checks only; packaging runs for master pushes and manual runs.
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # Oldest supported distro: the assets need glibc 2.39 or newer.
     container: ubuntu:24.04
@@ -75,7 +74,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master'
     needs: [ build-linux, floor-ubuntu-2404, package ]
     runs-on: ubuntu-latest
     permissions:
